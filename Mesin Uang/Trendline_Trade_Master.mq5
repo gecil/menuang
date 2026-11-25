@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //|                                       Trendline_Trade_Master.mq5 |
-//|     Trendline Trade Master v1.00 — Real-Time Touch Order/TP/SL   |
-//|  Panel 1-Klik + Deteksi Garis Manual | Multi-Order | XM Ready    |
+//|     Trendline Trade Master v1.10 — Real-Time Touch Order/TP/SL   |
+//|  Panel 1-Klik + Garis Manual + Bunyi Trendline Biasa | XM Ready  |
 //+------------------------------------------------------------------+
 #property copyright   "Copyright 2026, Trendline Trade Master"
-#property version     "1.00"
+#property version     "1.10"
 #property description "EA Visual Garis Tren: Eksekusi Real-Time Tick saat Garis Tersentuh (BUY, SELL, TP, SL)"
-#property description "Panel 1-Klik + Garis Manual (OBJ_TREND & OBJ_HLINE) | Multi-Order | Auto Hapus/Nonaktif Pasca-Entry"
+#property description "v1.10: Presisi Visual Bar 0 + Bunyi Otomatis Semua Garis Tren Biasa + Alert Jelas Algo OFF"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -37,7 +37,8 @@ enum ENUM_LINE_ROLE
    ROLE_SL_ALL  = 6,
    ROLE_SL_BUY  = 7,
    ROLE_SL_SELL = 8,
-   ROLE_CLOSE   = 9
+   ROLE_CLOSE   = 9,
+   ROLE_ALERT   = 10       // Garis trendline/horizontal biasa -> hanya bunyi/alert tanpa order
 };
 
 input group "=== 1. LOT & MULTI-ORDER ==="
@@ -55,19 +56,28 @@ input bool                    InpDeleteTPSLAfterHit    = true;              // H
 input bool                    InpTPOnlyIfProfit        = true;              // Garis "TP" umum hanya tutup posisi yg sedang profit (aman multi-order)
 input bool                    InpSLOnlyIfLoss          = true;              // Garis "SL" umum hanya tutup posisi yg sedang loss (aman multi-order)
 
-input group "=== 3. BACKUP BROKER SL/TP DALAM USD (OPSIONAL) ==="
+input group "=== 3. BUNYI & ALERT GARIS TRENDLINE BIASA ==="
+input bool                    InpAlertPlainLines       = true;              // Bunyikan suara saat SEMUA garis tren biasa terlewati?
+input bool                    InpPlainLineRepeat       = false;             // False = bunyi 1x per garis; True = bunyi ulang jika dilewati lagi
+input int                     InpPlainRepeatCooldownSec= 30;                // Jeda anti-spam (detik) jika bunyi ulang aktif
+input bool                    InpPlainLinePopup        = true;              // Tampilkan pop-up Alert saat garis biasa terlewati?
+input string                  InpSoundEntry            = "alert.wav";       // File suara saat garis BUY/SELL tersentuh
+input string                  InpSoundClose            = "ok.wav";          // File suara saat garis TP/SL menutup posisi
+input string                  InpSoundPlain            = "alert2.wav";      // File suara saat garis trendline biasa terlewati
+
+input group "=== 4. BACKUP BROKER SL/TP DALAM USD (OPSIONAL) ==="
 input bool                    InpUseBrokerSLTP         = false;             // Pasang SL/TP broker otomatis saat garis Entry tersentuh?
 input double                  InpBrokerSLMoneyBase     = 3.0;               // SL Broker ($) untuk InpDefaultLot (proporsional jika lot beda)
 input double                  InpBrokerTPMoneyBase     = 6.0;               // TP Broker ($) untuk InpDefaultLot (RR 1:2)
 input double                  InpCommissionPerLot      = 0.0;               // Komisi per 1.00 lot (XM Std/UltraLow=0, XM Zero=7.0)
 
-input group "=== 4. FILTER BROKER (XM READY) ==="
+input group "=== 5. FILTER BROKER (XM READY) ==="
 input int                     InpMaxSpreadPts          = 80;                // Spread maks untuk Entry baru (poin, 0=Off; TP/SL tidak diblokir)
 input int                     InpSlippagePts           = 80;                // Toleransi Slippage (poin)
 input int                     InpFastRetries           = 3;                 // Retry cepat (80ms) saat Requote/Off-Quotes
 input long                    InpMagicNumber           = 990100;            // Magic Number EA
 
-input group "=== 5. TAMPILAN PANEL & WARNA GARIS ==="
+input group "=== 6. TAMPILAN PANEL & WARNA GARIS ==="
 input bool                    InpShowPanel             = true;              // Tampilkan Panel Tombol 1-Klik di Chart
 input int                     InpPanelX                = 14;                // Posisi X Panel
 input int                     InpPanelY                = 24;                // Posisi Y Panel
@@ -76,7 +86,7 @@ input color                   InpColorSell             = clrOrangeRed;      // W
 input color                   InpColorTP               = clrLimeGreen;      // Warna Garis TP
 input color                   InpColorSL               = clrGold;           // Warna Garis SL
 input int                     InpLineWidth             = 2;                 // Ketebalan Garis Tren (1-5)
-input bool                    InpEnableAlerts          = true;              // Pop-up Alert saat garis tersentuh?
+input bool                    InpEnableAlerts          = true;              // Pop-up Alert saat order/TP/SL tereksekusi?
 input bool                    InpEnablePush            = false;             // Push Notification ke HP?
 
 //+------------------------------------------------------------------+
@@ -102,7 +112,7 @@ struct SLineTrack
    string         name;
    ENUM_LINE_ROLE role;
    int            prevSide;      // +1 harga di atas garis, -1 harga di bawah garis, 0 belum terekam
-   ulong          armedAfterMs;  // GetTickCount64() batas selesai cooldown geser
+   ulong          armedAfterMs;  // GetTickCount64() batas selesai cooldown geser/repeat
    double         lastLinePx;
    bool           seenThisPass;
 };
@@ -117,15 +127,17 @@ double      g_activeLot      = 0.01;
 bool        g_panelMinimized = false;
 int         g_lineCounter    = 1;
 string      g_lastStatusMsg  = "Siap — klik tombol atau gambar garis manual";
+ulong       g_lastAlgoWarnMs = 0;
 SLineTrack  g_tracks[];
 
 int         g_cntBuyLines    = 0;
 int         g_cntSellLines   = 0;
 int         g_cntTPLines     = 0;
 int         g_cntSLLines     = 0;
+int         g_cntAlertLines  = 0;
 
 //+------------------------------------------------------------------+
-//| [4] Helper Umum & Lot                                            |
+//| [4] Helper Umum, Suara & Lot                                     |
 //+------------------------------------------------------------------+
 int GetLotDigits(double stepLot)
 {
@@ -171,14 +183,32 @@ bool IsRetryableRetcode(uint code)
            code == TRADE_RETCODE_TOO_MANY_REQUESTS);
 }
 
-void NotifyStatus(string msg, bool showAlert = false)
+void PlayAudioCue(const string wavFile)
+{
+   if(wavFile == "" || MQLInfoInteger(MQL_OPTIMIZATION)) return;
+   PlaySound(wavFile);
+}
+
+void NotifyStatus(string msg, bool showAlert = false, string soundFile = "")
 {
    g_lastStatusMsg = TimeToString(TimeCurrent(), TIME_SECONDS) + " | " + msg;
    Print("[Trendline Master] ", msg);
+
+   if(soundFile != "")
+      PlayAudioCue(soundFile);
+
    if(showAlert && InpEnableAlerts && !MQLInfoInteger(MQL_OPTIMIZATION))
       Alert("[Trendline Master] ", _Symbol, " | ", msg);
    if(showAlert && InpEnablePush && !MQLInfoInteger(MQL_OPTIMIZATION))
       SendNotification("[Trendline Master] " + _Symbol + " | " + msg);
+}
+
+void WarnAlgoTradingOff(const string context)
+{
+   ulong nowMs = GetTickCount64();
+   if(nowMs - g_lastAlgoWarnMs < 8000) return; // Anti-spam: maks 1 alert per 8 detik
+   g_lastAlgoWarnMs = nowMs;
+   NotifyStatus("GAGAL " + context + ": Algo Trading OFF! Aktifkan tombol Algo Trading MT5!", true, "timeout.wav");
 }
 
 bool IsManagedPosition(ulong ticket)
@@ -282,14 +312,14 @@ bool HasToken(const string upperText, const string token)
       if(!leftOK)
       {
          ushort chL = StringGetCharacter(upperText, pos - 1);
-         leftOK = !((chL >= 'A' && chL <= 'Z') || (chL >= '0' && chL <= '9'));
+         leftOK = !(chL >= 'A' && chL <= 'Z');
       }
       int endPos = pos + StringLen(token);
       bool rightOK = (endPos >= StringLen(upperText));
       if(!rightOK)
       {
          ushort chR = StringGetCharacter(upperText, endPos);
-         rightOK = !((chR >= 'A' && chR <= 'Z') || (chR >= '0' && chR <= '9'));
+         rightOK = !(chR >= 'A' && chR <= 'Z');
       }
       if(leftOK && rightOK)
          return true;
@@ -312,15 +342,21 @@ ENUM_LINE_ROLE DetectLineRole(const string objName)
    string comb = objName + " " + desc;
    StringToUpper(comb);
 
-   // Abaikan garis yang sudah selesai/dinonaktifkan
-   if(HasToken(comb, "DONE") || HasToken(comb, "USED") || HasToken(comb, "OFF"))
+   // Abaikan garis yang sudah selesai/dinonaktifkan/sudah berbunyi (1x mode)
+   if(HasToken(comb, "DONE") || HasToken(comb, "USED") || HasToken(comb, "OFF") || HasToken(comb, "ALERTED"))
       return ROLE_NONE;
 
    // 1. Cek CLOSE ALL terlebih dahulu
    if(HasToken(comb, "CLOSE") || HasToken(comb, "EXIT"))
       return ROLE_CLOSE;
 
-   // 2. Cek TP spesifik (TP_BUY / TP BUY / TP_SELL / TP SELL / TP)
+   // 2. Cek bentuk gabungan tanpa spasi (TPBUY / TPSELL / SLBUY / SLSELL)
+   if(HasToken(comb, "TPBUY"))  return ROLE_TP_BUY;
+   if(HasToken(comb, "TPSELL")) return ROLE_TP_SELL;
+   if(HasToken(comb, "SLBUY"))  return ROLE_SL_BUY;
+   if(HasToken(comb, "SLSELL")) return ROLE_SL_SELL;
+
+   // 3. Cek TP & SL standar
    bool isTP   = HasToken(comb, "TP") || HasToken(comb, "TAKEPROFIT");
    bool isSL   = HasToken(comb, "SL") || HasToken(comb, "STOPLOSS");
    bool isBuy  = HasToken(comb, "BUY")  || HasToken(comb, "LONG");
@@ -333,7 +369,6 @@ ENUM_LINE_ROLE DetectLineRole(const string objName)
       return ROLE_TP_ALL;
    }
 
-   // 3. Cek SL spesifik (SL_BUY / SL BUY / SL_SELL / SL SELL / SL)
    if(isSL)
    {
       if(isBuy && !isSell) return ROLE_SL_BUY;
@@ -344,6 +379,10 @@ ENUM_LINE_ROLE DetectLineRole(const string objName)
    // 4. Cek Entry BUY / SELL
    if(isBuy && !isSell) return ROLE_BUY;
    if(isSell && !isBuy) return ROLE_SELL;
+
+   // 5. Garis Alert eksplisit (ALERT / BELL) atau semua garis trendline/horizontal biasa
+   if(HasToken(comb, "ALERT") || HasToken(comb, "BELL") || InpAlertPlainLines)
+      return ROLE_ALERT;
 
    return ROLE_NONE;
 }
@@ -369,8 +408,8 @@ double ParseLineLot(const string objName)
             if(c2 == '.' && !hasDot)   { hasDot = true; i++; continue; }
             break;
          }
-         // Hanya terima angka desimal (mengandung titik, mis. 0.01 / 0.05 / 1.00)
-         // agar nomor urut garis seperti TL_BUY_1 atau TL_BUY_2 tidak dianggap 1.0 / 2.0 lot!
+         // Hanya terima angka desimal (mis. 0.01 / 0.05 / 1.00)
+         // agar nomor urut garis seperti TL_BUY_1 atau BUY1 tidak terbaca sebagai 1.00 lot!
          if(hasDot)
          {
             string tok = StringSubstr(src, start, i - start);
@@ -384,6 +423,7 @@ double ParseLineLot(const string objName)
    return NormalizeLot(g_activeLot);
 }
 
+// Presisi visual v1.10: evaluasi garis tren tepat di posisi bar berjalan (bar 0) di layar!
 double GetLineCurrentPrice(const string objName)
 {
    long objType = ObjectGetInteger(0, objName, OBJPROP_TYPE);
@@ -392,10 +432,10 @@ double GetLineCurrentPrice(const string objName)
 
    if(objType == OBJ_TREND)
    {
-      // Ambil proyeksi harga garis tren pada waktu/bar berjalan saat ini
-      double p = ObjectGetValueByTime(0, objName, TimeCurrent(), 0);
+      datetime bar0Time = iTime(_Symbol, PERIOD_CURRENT, 0);
+      double p = (bar0Time > 0) ? ObjectGetValueByTime(0, objName, bar0Time, 0) : 0.0;
       if(p <= 0.0)
-         p = ObjectGetValueByTime(0, objName, iTime(_Symbol, PERIOD_CURRENT, 0), 0);
+         p = ObjectGetValueByTime(0, objName, TimeCurrent(), 0);
       return p;
    }
 
@@ -405,7 +445,7 @@ double GetLineCurrentPrice(const string objName)
 double GetReferencePriceForRole(ENUM_LINE_ROLE role)
 {
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if(InpTouchPriceMode == TOUCH_BID_CHART)
+   if(InpTouchPriceMode == TOUCH_BID_CHART || role == ROLE_ALERT)
       return bid;
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -425,7 +465,7 @@ int FindTrackIndex(const string name)
    return -1;
 }
 
-void ArmOrResetTrack(const string name, ENUM_LINE_ROLE role, bool withCooldown)
+void ArmOrResetTrack(const string name, ENUM_LINE_ROLE role, int customCooldownSec = -1)
 {
    double lp = GetLineCurrentPrice(name);
    double rp = GetReferencePriceForRole(role);
@@ -436,8 +476,8 @@ void ArmOrResetTrack(const string name, ENUM_LINE_ROLE role, bool withCooldown)
       else if(rp < lp) side = -1;
    }
 
-   ulong coolMs = withCooldown ? (ulong)MathMax(0, InpDragCooldownSec) * 1000 : 0;
-   ulong armAt  = GetTickCount64() + coolMs;
+   int sec = (customCooldownSec >= 0) ? customCooldownSec : MathMax(0, InpDragCooldownSec);
+   ulong armAt = GetTickCount64() + (ulong)sec * 1000;
 
    int idx = FindTrackIndex(name);
    if(idx < 0)
@@ -471,7 +511,6 @@ void FinalizeTriggeredLine(const string objName, bool isEntryLine)
    }
    else
    {
-      // Nonaktifkan secara visual (abu-abu putus-putus + tandai _DONE di deskripsi)
       ObjectSetInteger(0, objName, OBJPROP_COLOR, clrDimGray);
       ObjectSetInteger(0, objName, OBJPROP_STYLE, STYLE_DOT);
       ObjectSetInteger(0, objName, OBJPROP_WIDTH, 1);
@@ -485,6 +524,39 @@ void FinalizeTriggeredLine(const string objName, bool isEntryLine)
    ChartRedraw(0);
 }
 
+void TriggerPlainLineAlert(const string objName, double linePx, double refPx)
+{
+   string dir = (refPx >= linePx) ? "NAIK menembus" : "TURUN menembus";
+   string msg = StringFormat("GARIS TREN TERLEWATI: %s (%s @ %.*f)", objName, dir, g_digits, linePx);
+
+   g_lastStatusMsg = TimeToString(TimeCurrent(), TIME_SECONDS) + " | " + msg;
+   Print("[Trendline Master] ", msg);
+
+   // Mainkan bunyi suara langsung!
+   PlayAudioCue(InpSoundPlain);
+
+   if(InpPlainLinePopup && !MQLInfoInteger(MQL_OPTIMIZATION))
+      Alert("[Trendline Master] ", _Symbol, " | ", msg);
+   if(InpEnablePush && !MQLInfoInteger(MQL_OPTIMIZATION))
+      SendNotification("[Trendline Master] " + _Symbol + " | " + msg);
+
+   if(!InpPlainLineRepeat)
+   {
+      // Bunyi 1x saja: tandai [ALERTED] pada deskripsi tanpa menghapus garis analisis Anda
+      string oldDesc = ObjectGetString(0, objName, OBJPROP_TEXT);
+      string newDesc = (oldDesc == "") ? "[ALERTED]" : (oldDesc + " [ALERTED]");
+      ObjectSetString(0, objName, OBJPROP_TEXT, newDesc);
+      int idx = FindTrackIndex(objName);
+      if(idx >= 0) RemoveTrackByIndex(idx);
+      ChartRedraw(0);
+   }
+   else
+   {
+      // Mode bunyi berulang: beri jeda anti-spam
+      ArmOrResetTrack(objName, ROLE_ALERT, MathMax(3, InpPlainRepeatCooldownSec));
+   }
+}
+
 //+------------------------------------------------------------------+
 //| [8] Eksekusi Order & Penutupan Posisi (XM Fast-Retry Ready)      |
 //+------------------------------------------------------------------+
@@ -492,13 +564,13 @@ bool ExecuteTrendlineEntry(ENUM_POSITION_TYPE type, double lot, const string lin
 {
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
    {
-      NotifyStatus("GAGAL: Algo Trading belum aktif di MT5!", true);
+      WarnAlgoTradingOff("ORDER " + lineName);
       return false;
    }
 
    if(SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE) != SYMBOL_TRADE_MODE_FULL)
    {
-      NotifyStatus("GAGAL: Simbol ini tidak mendukung open posisi (cek simbol XM)!", true);
+      NotifyStatus("GAGAL: Simbol ini tidak mendukung open posisi (cek simbol XM)!", true, "timeout.wav");
       return false;
    }
 
@@ -546,7 +618,8 @@ bool ExecuteTrendlineEntry(ENUM_POSITION_TYPE type, double lot, const string lin
       {
          double fillPx = (g_trade.ResultPrice() > 0.0) ? g_trade.ResultPrice() : px;
          NotifyStatus(StringFormat("ORDER %s %.2f @ %.*f (sentuh %s @ %.*f)",
-                                   dirTxt, lot, g_digits, fillPx, lineName, g_digits, linePrice), true);
+                                   dirTxt, lot, g_digits, fillPx, lineName, g_digits, linePrice),
+                      true, InpSoundEntry);
          return true;
       }
 
@@ -554,15 +627,50 @@ bool ExecuteTrendlineEntry(ENUM_POSITION_TYPE type, double lot, const string lin
          continue;
 
       NotifyStatus(StringFormat("GAGAL %s %.2f (%s) kode %u: %s",
-                                dirTxt, lot, lineName, rc, g_trade.ResultRetcodeDescription()), true);
+                                dirTxt, lot, lineName, rc, g_trade.ResultRetcodeDescription()),
+                   true, "timeout.wav");
       return false;
    }
 
    return false;
 }
 
+// Return: >0 jumlah posisi ditutup, 0 tidak ada posisi cocok, -1 diblokir Algo Trading OFF
 int ClosePositionsByTrendline(ENUM_LINE_ROLE role, const string lineName, double linePrice)
 {
+   int matchingCnt = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !IsManagedPosition(ticket)) continue;
+      long   pType  = PositionGetInteger(POSITION_TYPE);
+      double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+
+      bool match = false;
+      switch(role)
+      {
+         case ROLE_CLOSE:   match = true; break;
+         case ROLE_TP_BUY:  match = (pType == POSITION_TYPE_BUY);  break;
+         case ROLE_TP_SELL: match = (pType == POSITION_TYPE_SELL); break;
+         case ROLE_TP_ALL:  match = InpTPOnlyIfProfit ? (profit >= 0.0) : true; break;
+         case ROLE_SL_BUY:  match = (pType == POSITION_TYPE_BUY);  break;
+         case ROLE_SL_SELL: match = (pType == POSITION_TYPE_SELL); break;
+         case ROLE_SL_ALL:  match = InpSLOnlyIfLoss   ? (profit <= 0.0) : true; break;
+         default:           match = false; break;
+      }
+      if(match) matchingCnt++;
+   }
+
+   if(matchingCnt == 0)
+      return 0;
+
+   // Cek izin Algo Trading dulu agar langsung memberi peringatan jelas jika OFF!
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
+   {
+      WarnAlgoTradingOff("CLOSE " + lineName);
+      return -1;
+   }
+
    int closedCnt = 0;
    double closedPL = 0.0;
    int maxTry = MathMax(0, InpFastRetries);
@@ -578,30 +686,14 @@ int ClosePositionsByTrendline(ENUM_LINE_ROLE role, const string lineName, double
       bool match = false;
       switch(role)
       {
-         case ROLE_CLOSE:
-            match = true;
-            break;
-         case ROLE_TP_BUY:
-            match = (pType == POSITION_TYPE_BUY);
-            break;
-         case ROLE_TP_SELL:
-            match = (pType == POSITION_TYPE_SELL);
-            break;
-         case ROLE_TP_ALL:
-            match = InpTPOnlyIfProfit ? (profit >= 0.0) : true;
-            break;
-         case ROLE_SL_BUY:
-            match = (pType == POSITION_TYPE_BUY);
-            break;
-         case ROLE_SL_SELL:
-            match = (pType == POSITION_TYPE_SELL);
-            break;
-         case ROLE_SL_ALL:
-            match = InpSLOnlyIfLoss ? (profit <= 0.0) : true;
-            break;
-         default:
-            match = false;
-            break;
+         case ROLE_CLOSE:   match = true; break;
+         case ROLE_TP_BUY:  match = (pType == POSITION_TYPE_BUY);  break;
+         case ROLE_TP_SELL: match = (pType == POSITION_TYPE_SELL); break;
+         case ROLE_TP_ALL:  match = InpTPOnlyIfProfit ? (profit >= 0.0) : true; break;
+         case ROLE_SL_BUY:  match = (pType == POSITION_TYPE_BUY);  break;
+         case ROLE_SL_SELL: match = (pType == POSITION_TYPE_SELL); break;
+         case ROLE_SL_ALL:  match = InpSLOnlyIfLoss   ? (profit <= 0.0) : true; break;
+         default:           match = false; break;
       }
 
       if(!match) continue;
@@ -632,7 +724,8 @@ int ClosePositionsByTrendline(ENUM_LINE_ROLE role, const string lineName, double
       string tag = (role == ROLE_SL_ALL || role == ROLE_SL_BUY || role == ROLE_SL_SELL) ? "SL GARIS"
                  : (role == ROLE_CLOSE ? "CLOSE GARIS" : "TP GARIS");
       NotifyStatus(StringFormat("%s tersentuh (%s @ %.*f) -> Tutup %d posisi ($%+.2f)",
-                                tag, lineName, g_digits, linePrice, closedCnt, closedPL), true);
+                                tag, lineName, g_digits, linePrice, closedCnt, closedPL),
+                   true, InpSoundClose);
    }
 
    return closedCnt;
@@ -650,13 +743,13 @@ void ScanAndProcessTrendlines()
    for(int k = 0; k < tCount; k++)
       g_tracks[k].seenThisPass = false;
 
-   g_cntBuyLines  = 0;
-   g_cntSellLines = 0;
-   g_cntTPLines   = 0;
-   g_cntSLLines   = 0;
+   g_cntBuyLines   = 0;
+   g_cntSellLines  = 0;
+   g_cntTPLines    = 0;
+   g_cntSLLines    = 0;
+   g_cntAlertLines = 0;
 
-   // Kumpulkan daftar objek aktif dulu (aman bila ada objek dihapus saat loop)
-   string activeNames[];
+   string         activeNames[];
    ENUM_LINE_ROLE activeRoles[];
    int found = 0;
 
@@ -675,10 +768,11 @@ void ScanAndProcessTrendlines()
       activeRoles[found] = role;
       found++;
 
-      if(role == ROLE_BUY)                                         g_cntBuyLines++;
-      else if(role == ROLE_SELL)                                   g_cntSellLines++;
+      if(role == ROLE_BUY)                                                        g_cntBuyLines++;
+      else if(role == ROLE_SELL)                                                  g_cntSellLines++;
       else if(role == ROLE_TP_ALL || role == ROLE_TP_BUY || role == ROLE_TP_SELL) g_cntTPLines++;
-      else                                                         g_cntSLLines++;
+      else if(role == ROLE_ALERT)                                                 g_cntAlertLines++;
+      else                                                                        g_cntSLLines++;
    }
 
    for(int i = 0; i < found; i++)
@@ -695,8 +789,7 @@ void ScanAndProcessTrendlines()
       int idx = FindTrackIndex(name);
       if(idx < 0)
       {
-         // Garis baru ditemukan (mis. baru digambar manual oleh user) -> beri jeda cooldown geser
-         ArmOrResetTrack(name, role, true);
+         ArmOrResetTrack(name, role);
          continue;
       }
 
@@ -704,7 +797,7 @@ void ScanAndProcessTrendlines()
       g_tracks[idx].role         = role;
       g_tracks[idx].lastLinePx   = linePx;
 
-      // Selama masih dalam jeda cooldown geser (2 detik), perbarui sisi harga tanpa memicu eksekusi
+      // Selama masih jeda cooldown geser/repeat, perbarui sisi harga tanpa memicu eksekusi
       if(nowMs < g_tracks[idx].armedAfterMs)
       {
          if(refPx > linePx)      g_tracks[idx].prevSide =  1;
@@ -720,7 +813,7 @@ void ScanAndProcessTrendlines()
          continue;
       }
 
-      // Deteksi sentuhan real-time (baik dari atas ke bawah maupun dari bawah ke atas)
+      // Deteksi sentuhan real-time (atas->bawah maupun bawah->atas)
       bool touched = false;
       if(prevSide == 1 && refPx <= linePx + tolPx)
          touched = true;
@@ -735,38 +828,40 @@ void ScanAndProcessTrendlines()
       }
 
       // --- GARIS TERSENTUH! EKSEKUSI SESUAI PERAN ---
-      if(role == ROLE_BUY || role == ROLE_SELL)
+      if(role == ROLE_ALERT)
+      {
+         TriggerPlainLineAlert(name, linePx, refPx);
+      }
+      else if(role == ROLE_BUY || role == ROLE_SELL)
       {
          double lot = ParseLineLot(name);
          ENUM_POSITION_TYPE pType = (role == ROLE_BUY) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
          if(ExecuteTrendlineEntry(pType, lot, name, linePx))
-         {
             FinalizeTriggeredLine(name, true);
-         }
          else
-         {
-            // Jika gagal (mis. spread tinggi/batas posisi), re-arm agar tidak spam tiap tick
-            ArmOrResetTrack(name, role, true);
-         }
+            ArmOrResetTrack(name, role, 3);
       }
       else
       {
-         // Garis TP / SL / CLOSE -> hanya dieksekusi & dihapus jika ada posisi yang benar-benar ditutup
-         int closed = ClosePositionsByTrendline(role, name, linePx);
-         if(closed > 0)
+         int res = ClosePositionsByTrendline(role, name, linePx);
+         if(res > 0)
          {
             FinalizeTriggeredLine(name, false);
          }
+         else if(res == -1)
+         {
+            // Algo Trading sedang OFF -> biarkan prevSide tetap siap, tunda 3 detik agar langsung close saat Algo dinyalakan lagi!
+            g_tracks[idx].armedAfterMs = nowMs + 3000;
+         }
          else
          {
-            // Belum ada posisi cocok -> balik sisi tracking agar tetap siap jika nanti harga menyentuh lagi
+            // Belum ada posisi cocok -> balik sisi tracking agar tetap aktif
             if(refPx > linePx)      g_tracks[idx].prevSide =  1;
             else if(refPx < linePx) g_tracks[idx].prevSide = -1;
          }
       }
    }
 
-   // Bersihkan catatan tracking untuk garis yang sudah dihapus manual oleh user
    for(int k = ArraySize(g_tracks) - 1; k >= 0; k--)
    {
       if(!g_tracks[k].seenThisPass)
@@ -782,13 +877,11 @@ void SpawnTrendline(ENUM_LINE_ROLE role)
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(bid <= 0.0) return;
 
-   // Hitung jarak spawn proporsional agar tidak langsung menempel di harga berjalan
    double chartMax = ChartGetDouble(0, CHART_PRICE_MAX, 0);
    double chartMin = ChartGetDouble(0, CHART_PRICE_MIN, 0);
    double visRange = chartMax - chartMin;
    double offset   = (visRange > 0.0) ? (visRange * 0.14) : (g_point * 200.0);
 
-   // Sedikit geser bertingkat jika user klik berkali-kali (multi-order)
    double stagger  = offset * 0.22 * ((g_lineCounter - 1) % 4);
    offset += stagger;
 
@@ -800,13 +893,13 @@ void SpawnTrendline(ENUM_LINE_ROLE role)
    switch(role)
    {
       case ROLE_BUY:
-         placeAbove = false; // Default di bawah harga (area support/bounce), bebas digeser ke atas untuk breakout!
+         placeAbove = false;
          tag  = "BUY";
          desc = StringFormat("BUY %.2f", g_activeLot);
          clr  = InpColorBuy;
          break;
       case ROLE_SELL:
-         placeAbove = true;  // Default di atas harga (area resistance), bebas digeser ke bawah untuk breakdown!
+         placeAbove = true;
          tag  = "SELL";
          desc = StringFormat("SELL %.2f", g_activeLot);
          clr  = InpColorSell;
@@ -880,10 +973,9 @@ void SpawnTrendline(ENUM_LINE_ROLE role)
    ObjectSetString(0, objName, OBJPROP_TEXT, desc);
    ObjectSetString(0, objName, OBJPROP_TOOLTIP, desc + " — geser titik garis ke area tren Anda");
 
-   // Aktifkan tampilan deskripsi objek di chart agar label garis langsung terlihat
    ChartSetInteger(0, CHART_SHOW_OBJECT_DESCR, true);
 
-   ArmOrResetTrack(objName, role, true);
+   ArmOrResetTrack(objName, role);
    NotifyStatus(StringFormat("Garis %s dibuat (%s) — geser ke posisi tren Anda", objName, desc), false);
    ChartRedraw(0);
 }
@@ -895,14 +987,16 @@ void ClearAllTrendlines()
    {
       string name = ObjectName(0, i, 0, -1);
       if(name == "" || StringFind(name, UI_PFX) == 0) continue;
-      if(DetectLineRole(name) != ROLE_NONE || StringFind(name, "TL_") == 0)
+      // Hapus hanya garis yang dibuat panel (TL_) atau garis order/TP/SL, biarkan garis analisis biasa aman kecuali TL_
+      ENUM_LINE_ROLE role = DetectLineRole(name);
+      if(StringFind(name, "TL_") == 0 || (role != ROLE_NONE && role != ROLE_ALERT))
       {
          ObjectDelete(0, name);
          delCnt++;
       }
    }
    ArrayResize(g_tracks, 0);
-   NotifyStatus(StringFormat("Menghapus %d garis tren dari chart", delCnt), false);
+   NotifyStatus(StringFormat("Menghapus %d garis order/TP/SL dari chart", delCnt), false);
    ChartRedraw(0);
 }
 
@@ -975,17 +1069,20 @@ void RenderPanel()
 
    int x = InpPanelX;
    int y = InpPanelY;
-   int w = 264;
-   int h = g_panelMinimized ? 30 : 284;
+   int w = 272;
+   int h = g_panelMinimized ? 30 : 288;
 
-   CreateRect(UI_PFX + "BG", x, y, w, h, C'17,24,39', C'55,65,81');
-   CreateRect(UI_PFX + "HDR", x, y, w, 30, C'30,41,59', C'55,65,81');
-   CreateLabel(UI_PFX + "TITLE", x + 10, y + 7, "TRENDLINE TRADE MASTER v1.0", clrWhite, 9, "Segoe UI Bold");
+   bool algoOK = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) && MQLInfoInteger(MQL_TRADE_ALLOWED));
+
+   CreateRect(UI_PFX + "BG", x, y, w, h, C'17,24,39', algoOK ? C'55,65,81' : clrRed);
+   CreateRect(UI_PFX + "HDR", x, y, w, 30, algoOK ? C'30,41,59' : C'127,29,29', C'55,65,81');
+   CreateLabel(UI_PFX + "TITLE", x + 10, y + 7,
+               algoOK ? "TRENDLINE TRADE MASTER v1.1" : "ALGO TRADING OFF! NYALAKAN",
+               clrWhite, 9, "Segoe UI Bold");
    CreateButton(BTN_MINIMIZE, x + w - 28, y + 4, 22, 22, g_panelMinimized ? "+" : "-", C'51,65,85', clrWhite, 9);
 
    if(g_panelMinimized)
    {
-      // Sembunyikan elemen body saat minimize
       string bodyNames[] = {
          UI_PFX+"LBL_LOT", BTN_LOT_MINUS, UI_PFX+"VAL_LOT", BTN_LOT_PLUS,
          BTN_ADD_BUY, BTN_ADD_SELL, BTN_ADD_TP, BTN_ADD_SL,
@@ -999,54 +1096,49 @@ void RenderPanel()
       return;
    }
 
-   // Baris Lot
    int rowY = y + 38;
    CreateLabel(UI_PFX + "LBL_LOT", x + 10, rowY + 4, "Lot Garis Baru:", C'148,163,184', 8);
-   CreateButton(BTN_LOT_MINUS, x + 112, rowY, 28, 22, "-", C'51,65,85', clrWhite, 9);
-   CreateLabel(UI_PFX + "VAL_LOT", x + 150, rowY + 3, DoubleToString(g_activeLot, 2), clrYellow, 9, "Segoe UI Bold");
-   CreateButton(BTN_LOT_PLUS, x + 206, rowY, 28, 22, "+", C'51,65,85', clrWhite, 9);
+   CreateButton(BTN_LOT_MINUS, x + 114, rowY, 28, 22, "-", C'51,65,85', clrWhite, 9);
+   CreateLabel(UI_PFX + "VAL_LOT", x + 152, rowY + 3, DoubleToString(g_activeLot, 2), clrYellow, 9, "Segoe UI Bold");
+   CreateButton(BTN_LOT_PLUS, x + 210, rowY, 28, 22, "+", C'51,65,85', clrWhite, 9);
 
-   // Baris Tombol Utama: + BUY / + SELL
    rowY += 30;
-   CreateButton(BTN_ADD_BUY,  x + 10,  rowY, 118, 28, "+ Garis BUY",  C'29,78,216',  clrWhite, 8);
-   CreateButton(BTN_ADD_SELL, x + 136, rowY, 118, 28, "+ Garis SELL", C'185,28,28',  clrWhite, 8);
+   CreateButton(BTN_ADD_BUY,  x + 10,  rowY, 122, 28, "+ Garis BUY",  C'29,78,216',  clrWhite, 8);
+   CreateButton(BTN_ADD_SELL, x + 140, rowY, 122, 28, "+ Garis SELL", C'185,28,28',  clrWhite, 8);
 
-   // Baris Tombol TP / SL Umum
    rowY += 34;
-   CreateButton(BTN_ADD_TP,   x + 10,  rowY, 118, 26, "+ Garis TP",   C'21,128,61',  clrWhite, 8);
-   CreateButton(BTN_ADD_SL,   x + 136, rowY, 118, 26, "+ Garis SL",   C'180,83,9',   clrWhite, 8);
+   CreateButton(BTN_ADD_TP,   x + 10,  rowY, 122, 26, "+ Garis TP",   C'21,128,61',  clrWhite, 8);
+   CreateButton(BTN_ADD_SL,   x + 140, rowY, 122, 26, "+ Garis SL",   C'180,83,9',   clrWhite, 8);
 
-   // Baris Tombol TP/SL Spesifik Arah (untuk Multi-Order)
    rowY += 32;
-   CreateButton(BTN_ADD_TPBUY,  x + 10,  rowY, 57, 22, "TP BUY",  C'20,83,45',  C'187,247,208', 7);
-   CreateButton(BTN_ADD_TPSELL, x + 71,  rowY, 57, 22, "TP SELL", C'20,83,45',  C'187,247,208', 7);
-   CreateButton(BTN_ADD_SLBUY,  x + 136, rowY, 57, 22, "SL BUY",  C'120,53,15', C'254,240,138', 7);
-   CreateButton(BTN_ADD_SLSELL, x + 197, rowY, 57, 22, "SL SELL", C'120,53,15', C'254,240,138', 7);
+   CreateButton(BTN_ADD_TPBUY,  x + 10,  rowY, 59, 22, "TP BUY",  C'20,83,45',  C'187,247,208', 7);
+   CreateButton(BTN_ADD_TPSELL, x + 73,  rowY, 59, 22, "TP SELL", C'20,83,45',  C'187,247,208', 7);
+   CreateButton(BTN_ADD_SLBUY,  x + 140, rowY, 59, 22, "SL BUY",  C'120,53,15', C'254,240,138', 7);
+   CreateButton(BTN_ADD_SLSELL, x + 203, rowY, 59, 22, "SL SELL", C'120,53,15', C'254,240,138', 7);
 
-   // Baris Aksi Bersih
    rowY += 30;
-   CreateButton(BTN_CLEAR_LN,  x + 10,  rowY, 118, 24, "Hapus Garis", C'51,65,85',  C'226,232,240', 8);
-   CreateButton(BTN_CLOSE_ALL, x + 136, rowY, 118, 24, "Close All",   C'127,29,29', C'254,202,202', 8);
+   CreateButton(BTN_CLEAR_LN,  x + 10,  rowY, 122, 24, "Hapus Garis", C'51,65,85',  C'226,232,240', 8);
+   CreateButton(BTN_CLOSE_ALL, x + 140, rowY, 122, 24, "Close All",   C'127,29,29', C'254,202,202', 8);
 
-   // Footer Informasi Real-Time
    rowY += 32;
-   double spPts   = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / g_point;
-   int    posCnt  = CountManagedPositions(0);
-   double fltPL   = GetManagedFloatingPL();
-   string algoTxt = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) && MQLInfoInteger(MQL_TRADE_ALLOWED)) ? "ON" : "OFF!";
+   double spPts  = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / g_point;
+   int    posCnt = CountManagedPositions(0);
+   double fltPL  = GetManagedFloatingPL();
 
    CreateLabel(UI_PFX + "INF1", x + 10, rowY,
-               StringFormat("Garis Aktif: BUY %d | SELL %d | TP %d | SL %d", g_cntBuyLines, g_cntSellLines, g_cntTPLines, g_cntSLLines),
+               StringFormat("BUY:%d | SELL:%d | TP:%d | SL:%d | Bell:%d",
+                            g_cntBuyLines, g_cntSellLines, g_cntTPLines, g_cntSLLines, g_cntAlertLines),
                C'203,213,225', 8);
    CreateLabel(UI_PFX + "INF2", x + 10, rowY + 17,
                StringFormat("Posisi: %d | Float: $%+.2f | Spread: %.0f pts", posCnt, fltPL, spPts),
                (fltPL >= 0.0) ? C'134,239,172' : C'252,165,165', 8);
    CreateLabel(UI_PFX + "INF3", x + 10, rowY + 34,
-               StringFormat("Algo: %s | Manual: ketik BUY/SELL/TP/SL di garis", algoTxt),
-               (algoTxt == "ON") ? C'148,163,184' : clrRed, 7);
+               algoOK ? ("Algo: ON | Bunyi Garis Biasa: " + (InpAlertPlainLines ? "AKTIF" : "OFF"))
+                      : "PERINGATAN: Algo Trading OFF! Cek toolbar MT5",
+               algoOK ? C'148,163,184' : clrRed, 7);
 
-   string shortMsg = (StringLen(g_lastStatusMsg) > 42) ? (StringSubstr(g_lastStatusMsg, 0, 39) + "...") : g_lastStatusMsg;
-   CreateLabel(UI_PFX + "INF4", x + 10, rowY + 50, shortMsg, clrGold, 7);
+   string shortMsg = (StringLen(g_lastStatusMsg) > 43) ? (StringSubstr(g_lastStatusMsg, 0, 40) + "...") : g_lastStatusMsg;
+   CreateLabel(UI_PFX + "INF4", x + 10, rowY + 51, shortMsg, clrGold, 7);
 
    ChartRedraw(0);
 }
@@ -1066,22 +1158,22 @@ int OnInit()
 
    ArrayResize(g_tracks, 0);
 
-   // Daftarkan garis tren yang sudah ada di chart saat EA dipasang (tanpa langsung memicu)
+   // Daftarkan semua garis tren yang sudah ada di chart tanpa langsung memicu
    int totalObj = ObjectsTotal(0, 0, -1);
    for(int i = 0; i < totalObj; i++)
    {
       string name = ObjectName(0, i, 0, -1);
       ENUM_LINE_ROLE role = DetectLineRole(name);
       if(role != ROLE_NONE)
-         ArmOrResetTrack(name, role, false);
+         ArmOrResetTrack(name, role, 0);
    }
 
    if(!MQLInfoInteger(MQL_OPTIMIZATION))
       EventSetTimer(1);
 
    RenderPanel();
-   PrintFormat("=== Trendline Trade Master v1.00 Aktif | %s | Lot=%.2f | MaxSpread=%d pts ===",
-               _Symbol, g_activeLot, InpMaxSpreadPts);
+   PrintFormat("=== Trendline Trade Master v1.10 Aktif | %s | Lot=%.2f | MaxSpread=%d pts | PlainAlert=%s ===",
+               _Symbol, g_activeLot, InpMaxSpreadPts, InpAlertPlainLines ? "ON" : "OFF");
    return(INIT_SUCCEEDED);
 }
 
@@ -1089,7 +1181,7 @@ void OnDeinit(const int reason)
 {
    EventKillTimer();
    DestroyPanel();
-   Print("=== Trendline Trade Master v1.00 Dihentikan ===");
+   Print("=== Trendline Trade Master v1.10 Dihentikan ===");
 }
 
 void OnTick()
@@ -1115,20 +1207,18 @@ void OnChartEvent(const int id,
                   const double &dparam,
                   const string &sparam)
 {
-   // 1. User membuat / menggeser / mengubah nama garis tren -> reset cooldown & sisi harga agar tidak misfire!
    if(id == CHARTEVENT_OBJECT_CREATE || id == CHARTEVENT_OBJECT_DRAG || id == CHARTEVENT_OBJECT_CHANGE)
    {
       if(StringFind(sparam, UI_PFX) == 0) return;
       ENUM_LINE_ROLE role = DetectLineRole(sparam);
       if(role != ROLE_NONE)
       {
-         ArmOrResetTrack(sparam, role, true);
+         ArmOrResetTrack(sparam, role);
          RenderPanel();
       }
       return;
    }
 
-   // 2. User menghapus garis manual
    if(id == CHARTEVENT_OBJECT_DELETE)
    {
       int idx = FindTrackIndex(sparam);
@@ -1137,7 +1227,6 @@ void OnChartEvent(const int id,
       return;
    }
 
-   // 3. Klik tombol pada Panel 1-Klik
    if(id == CHARTEVENT_OBJECT_CLICK)
    {
       if(StringFind(sparam, UI_PFX) != 0) return;
