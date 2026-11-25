@@ -1,13 +1,13 @@
 //+------------------------------------------------------------------+
 //|                                           Mesin Uang.mq5         |
-//|  Mesin Uang v8.20 - Gold Scalper & Split-Order Flip Martingale   |
-//|  Timer Presisi Detik :00 (XM), Spread 55+, Split Lot & Auto BE   |
+//|  Mesin Uang v9.00 - Standard Precision Flip Martingale (RR 1:2)  |
+//|  Fix Anti-Tumpuk 0.01, SL $3 / TP $6 Bersih, Presisi XM Detik 00 |
 //|                                      https://sagu.pages.dev      |
 //+------------------------------------------------------------------+
 #property copyright   "Mochamad Tabrani & Antigravity AI"
 #property link        "https://sagu.pages.dev"
-#property version     "8.20"
-#property description "Mesin Uang v8.20: Timer Detik :00 Presisi (XM), Spread 55+, Auto Retry Requote, Pecah Lot (81.92 x N) & Auto BE"
+#property version     "9.00"
+#property description "Mesin Uang v9.00: 1 Posisi Bersih/Step (Fix Bug Tumpuk 0.01), SL $3 & TP $6 Bersih (RR 1:2), Presisi Flip Martingale & Timer Detik :00 XM"
 
 #include <Trade\Trade.mqh>
 
@@ -16,87 +16,80 @@
 //+------------------------------------------------------------------+
 enum ENUM_TRIGGER_MODE
 {
-   TRIGGER_CANDLE   = 0,   // Candle: close kotak naik = BUY, turun = SELL
+   TRIGGER_CANDLE   = 0,   // Candle: close kotak naik = BUY, turun = SELL (Detik :00)
    TRIGGER_CROSSING = 1    // Crossing level angka bulat
 };
 
-enum ENUM_DIST_MODE
+enum ENUM_LOT_MODE
 {
-   DIST_FIXED = 0,         // Jarak SL tetap
-   DIST_ATR   = 1          // Jarak SL mengikuti ATR
-};
-
-enum ENUM_RR_MODE
-{
-   RR_1_1    = 0,          // 1:1 (SL 1, TP 1)
-   RR_1_2    = 1,          // 1:2 (SL 1, TP 2)
-   RR_1_3    = 2,          // 1:3 (SL 1, TP 3)
-   RR_CUSTOM = 3           // Kustom (isi pengali TP di bawah)
+   LOT_PRECISION_RECOVERY = 0, // Presisi Otomatis RR 1:2 (Tutup Rugi Aktual + Target Profit, Lot ~1.5x)
+   LOT_MULTIPLIER         = 1  // Pengali Tetap (Lot x InpLotMultiplier, mis. 1.5x atau 2.0x)
 };
 
 enum ENUM_AFTER_TP_MODE
 {
-   AFTER_TP_CONTINUE    = 0, // Langsung tembak searah (jika lolos filter)
-   AFTER_TP_WAIT_SIGNAL = 1  // Kembali STANDBY tunggu sinyal baru (Lebih Aman di Gold)
+   AFTER_TP_WAIT_SIGNAL = 0, // Kembali STANDBY tunggu detik :00 / sinyal baru (Rapi & Aman)
+   AFTER_TP_CONTINUE    = 1  // Langsung tembak searah (jika lolos filter)
 };
 
-input group "=== STRATEGI UTAMA & PECAH LOT BESAR ==="
-input bool                InpEnableBot        = true;              // Aktifkan Mesin Uang Otomatis?
-input ENUM_TRIGGER_MODE   InpTriggerMode      = TRIGGER_CANDLE;    // Pemicu entri siklus baru
-input ENUM_TIMEFRAMES     InpTriggerTF        = PERIOD_M1;         // Timeframe kotak (mode Candle)
-input bool                InpExactZeroTimer   = true;              // Timer Presisi Detik :00 (tidak menunggu tick broker)
-input int                 InpTimerPeriodMs    = 100;               // Interval cek timer detik :00 (ms, 50-500)
-input double              InpPriceInterval    = 1.0;               // Jarak level angka bulat (mode Crossing)
-input ENUM_AFTER_TP_MODE  InpAfterTPMode      = AFTER_TP_CONTINUE; // Aksi setelah TP tercapai
-input double              InpStartLot         = 0.01;              // Lot Dasar Awal (Step 1)
-input double              InpLotMultiplier    = 2.0;               // Faktor Pengali Martingale
-input int                 InpMaxSteps         = 0;                 // Step maks (0 = tanpa batas, terus lipat lot)
-input double              InpMaxLotPerOrder   = 81.92;             // Maks Lot per 1 Order (lebih dari ini otomatis dipecah beberapa kali)
-input bool                InpFitLotToMargin   = true;              // Jika margin kurang untuk lot penuh, buka sebesar margin yang muat (jangan reset 0.01)
+input group "=== STRATEGI FLIP MARTINGALE STANDAR (1 POSISI / STEP) ==="
+input bool                InpEnableBot        = true;                   // Aktifkan Mesin Uang Otomatis?
+input ENUM_TRIGGER_MODE   InpTriggerMode      = TRIGGER_CANDLE;         // Pemicu entri siklus baru
+input ENUM_TIMEFRAMES     InpTriggerTF        = PERIOD_M1;              // Timeframe kotak (mode Candle)
+input bool                InpExactZeroTimer   = true;                   // Timer Presisi Detik :00 (tidak menunggu tick XM)
+input int                 InpTimerPeriodMs    = 100;                    // Interval cek timer detik :00 (ms, 50-500)
+input double              InpPriceInterval    = 1.0;                    // Jarak level angka bulat (mode Crossing)
+input ENUM_AFTER_TP_MODE  InpAfterTPMode      = AFTER_TP_WAIT_SIGNAL;   // Aksi setelah TP tercapai (Default: Standby rapi di :00)
 
-input group "=== JARAK TP, SL & KOMPENSASI SPREAD ==="
-input ENUM_RR_MODE        InpRRMode           = RR_1_1;            // Rasio SL : TP
-input double              InpCustomRR         = 1.5;               // Pengali TP terhadap SL (jika rasio Kustom)
-input ENUM_DIST_MODE      InpDistMode         = DIST_FIXED;        // Mode jarak SL
-input double              InpTargetDistance   = 1.0;               // Jarak SL tetap (harga); mis. 1.00 di Gold
-input ENUM_TIMEFRAMES     InpATRTF            = PERIOD_M5;         // Timeframe ATR (mode ATR & Filter)
-input int                 InpATRPeriod        = 14;                // Periode ATR
-input double              InpATRMultiplier    = 1.0;               // Pengali ATR untuk jarak TP/SL
-input bool                InpCompensateSpread = true;              // Tambahkan Spread otomatis ke jarak TP?
+input group "=== SL & TP NILAI BERSIH PRESISI (RR 1:2 CONTOH XM) ==="
+input double              InpStartLot         = 0.01;                   // Lot Awal Step 1 (acuan nilai SL & TP di bawah)
+input double              InpSLMoneyBase      = 3.0;                    // Nilai SL Bersih untuk Lot Awal (mis. $3.00 pada 0.01 lot)
+input double              InpTPMoneyBase      = 6.0;                    // Nilai TP Bersih untuk Lot Awal (mis. $6.00 pada 0.01 lot -> RR 1:2)
+input double              InpCommissionPerLot = 0.0;                    // Komisi Round-Turn per 1.00 lot (XM Std/UltraLow=0, XM Zero=7.0)
 
-input group "=== PROTEKSI PROFIT LOCK / BREAK-EVEN (GOLD) ==="
-input int                 InpBEStartStep      = 3;                 // Aktifkan Break-Even mulai Step ke- (0 = nonaktif, 1 = semua step)
-input double              InpBETriggerPct     = 65.0;              // Geser SL ke BE saat harga capai % dari target TP
-input int                 InpBELockPts        = 10;                // Poin profit yang dikunci saat BE (poin)
+input group "=== PENGATURAN LOT FLIP MARTINGALE PRESISI ==="
+input ENUM_LOT_MODE       InpLotMode          = LOT_PRECISION_RECOVERY; // Mode hitung lot Flip (Default: Presisi RR 1:2)
+input double              InpCycleTargetUSD   = 6.0;                    // Target Profit Bersih Siklus mode Presisi ($, 0 = ikut InpTPMoneyBase)
+input double              InpLotMultiplier    = 2.0;                    // Pengali Lot (khusus mode Pengali Tetap)
+input int                 InpMaxSteps         = 0;                      // Step maks (0 = tanpa batas)
+input double              InpMaxLotPerOrder   = 81.92;                  // Maks Lot per 1 Tiket (jika melebihi baru dipecah)
+input bool                InpFitLotToMargin   = true;                   // Jika margin kurang, pakai lot maksimal yang muat (anti-reset 0.01)
 
-input group "=== AUTO LOT (OPSIONAL) ==="
-input bool                InpAutoLot          = false;             // Lot awal mengikuti saldo?
-input double              InpAutoLotBase      = 0.01;              // Lot per kelipatan saldo
-input double              InpAutoLotEvery     = 100.0;             // Kelipatan saldo (mata uang akun)
+input group "=== PROTEKSI BREAK-EVEN (OPSIONAL) ==="
+input int                 InpBEStartStep      = 0;                      // Aktifkan Break-Even mulai Step ke- (0 = nonaktif agar RR 1:2 murni)
+input double              InpBETriggerPct     = 65.0;                   // Geser SL ke BE saat harga capai % dari target TP
+input int                 InpBELockPts        = 10;                     // Poin profit yang dikunci saat BE (poin)
 
-input group "=== FILTER ANTI-SIDEWAYS & ENTRI SIKLUS BARU (XM GOLD) ==="
-input double              InpMinCandleBody    = 0.20;              // Body candle min (harga, mis 0.20 di Gold; 0 = selalu entry di :00)
-input double              InpMinBodyRatio     = 0.35;              // Rasio Body/Range candle min (0.0 - 1.0; 0 = nonaktif)
-input double              InpMinATRValue      = 0.0;               // ATR minimum untuk mulai Step 1 (0 = nonaktif)
-input bool                InpUseTrendFilter   = false;             // Hanya entri searah EMA + kemiringan EMA?
-input ENUM_TIMEFRAMES     InpTrendTF          = PERIOD_M5;         // Timeframe EMA
-input int                 InpTrendMAPeriod    = 50;                // Periode EMA
-input int                 InpMaxSpreadPts     = 80;                // Spread maks (poin, 0 = nonaktif; default 80 aman untuk XM Gold ~55)
-input bool                InpUseTimeFilter    = false;             // Filter jam server?
-input int                 InpStartHour        = 1;                 // Jam mulai (0-23)
-input int                 InpEndHour          = 23;                // Jam selesai (1-24)
-input double              InpDailyTargetPct   = 0.0;               // Stop siklus baru bila untung harian >= % (0 = nonaktif)
-input double              InpDailyLossPct     = 0.0;               // Stop bila rugi harian >= % (0 = nonaktif)
-input bool                InpHardDailyStop    = false;             // Hentikan rantai Martingale jika rugi harian tembus batas?
+input group "=== AUTO LOT SALDO (OPSIONAL) ==="
+input bool                InpAutoLot          = false;                  // Lot awal mengikuti saldo?
+input double              InpAutoLotBase      = 0.01;                   // Lot per kelipatan saldo
+input double              InpAutoLotEvery     = 100.0;                  // Kelipatan saldo (mata uang akun)
+
+input group "=== FILTER ENTRI SIKLUS BARU (XM GOLD SPREAD 55+) ==="
+input double              InpMinCandleBody    = 0.0;                    // Body candle min (0 = selalu entry di :00; mis. 0.20 untuk filter sideways)
+input double              InpMinBodyRatio     = 0.0;                    // Rasio Body/Range candle min (0 = nonaktif; mis. 0.35)
+input double              InpMinATRValue      = 0.0;                    // ATR minimum untuk mulai Step 1 (0 = nonaktif)
+input ENUM_TIMEFRAMES     InpATRTF            = PERIOD_M5;              // Timeframe ATR (jika filter ATR aktif)
+input int                 InpATRPeriod        = 14;                     // Periode ATR
+input bool                InpUseTrendFilter   = false;                  // Hanya entri searah EMA + kemiringan EMA?
+input ENUM_TIMEFRAMES     InpTrendTF          = PERIOD_M5;              // Timeframe EMA
+input int                 InpTrendMAPeriod    = 50;                     // Periode EMA
+input int                 InpMaxSpreadPts     = 80;                     // Spread maks (poin, 0 = nonaktif; default 80 aman untuk XM Gold ~55)
+input bool                InpUseTimeFilter    = false;                  // Filter jam server?
+input int                 InpStartHour        = 1;                      // Jam mulai (0-23)
+input int                 InpEndHour          = 23;                     // Jam selesai (1-24)
+input double              InpDailyTargetPct   = 0.0;                    // Stop siklus baru bila untung harian >= % (0 = nonaktif)
+input double              InpDailyLossPct     = 0.0;                    // Stop bila rugi harian >= % (0 = nonaktif)
+input bool                InpHardDailyStop    = false;                  // Hentikan rantai Martingale jika rugi harian tembus batas?
 
 input group "=== NOTIFIKASI & BROKER (XM) ==="
-input bool                InpEnableAlert      = true;              // Popup Alert di Layar MT5?
-input bool                InpEnablePush       = false;             // Notifikasi ke HP (MetaQuotes ID)?
-input bool                InpVerbose          = true;              // Catat alasan entri dilewati di tab Experts?
-input int                 InpEntryFastRetries = 3;                 // Retry cepat (80ms) jika kena Requote/Off-Quotes di detik :00
-input int                 InpMaxRetryCount    = 15;                // Maks percobaan ulang order Martingale jika gagal
-input int                 InpSlippage         = 80;                // Toleransi Slippage (pts, aman untuk volatilitas XM Gold)
-input long                InpMagicBot         = 888100;            // Magic Number Khusus Bot Ini
+input bool                InpEnableAlert      = true;                   // Popup Alert di Layar MT5?
+input bool                InpEnablePush       = false;                  // Notifikasi ke HP (MetaQuotes ID)?
+input bool                InpVerbose          = true;                   // Catat log detail di tab Experts?
+input int                 InpEntryFastRetries = 3;                      // Retry cepat (80ms) jika kena Requote/Off-Quotes di detik :00
+input int                 InpMaxRetryCount    = 15;                     // Maks percobaan ulang order Flip jika gagal
+input int                 InpSlippage         = 80;                     // Toleransi Slippage (pts)
+input long                InpMagicBot         = 888100;                 // Magic Number Khusus Bot Ini
 
 //+------------------------------------------------------------------+
 //| [2] Variabel Global                                              |
@@ -109,17 +102,18 @@ string            g_gvPrefix;
 int               g_currentStep      = 1;
 double            g_currentBotLot    = 0.01;
 double            g_lastPrice        = 0.0;
-double            g_lastDist         = 0.0;
+double            g_lastSLDist       = 3.0;     // Jarak harga SL presisi (mis. 3.00 di XM Gold -> -$3.00 per 0.01 lot)
+double            g_lastTPDist       = 6.0;     // Jarak harga TP presisi (mis. 6.00 di XM Gold -> +$6.00 per 0.01 lot)
 double            g_cycleNet         = 0.0;     // Akumulasi profit/loss bersih siklus berjalan
 datetime          g_lastSlot         = 0;       // Slot waktu candle terakhir yang sudah diproses
 datetime          g_syncServerSec    = 0;       // Detik TimeCurrent() terakhir dari server broker
 ulong             g_syncLocalMs      = 0;       // GetTickCount64() saat g_syncServerSec berubah
 string            g_lastTriggerInfo  = "Menunggu detik :00 berikutnya";
 
-// Variabel keranjang (Basket) untuk menangani Split Order (mis. 81.92 x 2 = 163.84)
-bool              g_isOpeningBasket  = false;   // Flag sedang membuka rangkaian split order
-double            g_stepAnchorPrice  = 0.0;     // Harga patokan tiket pertama agar TP/SL semua pecahan sama persis
-double            g_stepClosedNet    = 0.0;     // Akumulasi net dari pecahan tiket yang sudah tutup pada step ini
+// Variabel keranjang (Basket) untuk menangani Split Order (hanya aktif jika lot > InpMaxLotPerOrder)
+bool              g_isOpeningBasket  = false;   // Lock anti-reentrancy saat membuka order
+double            g_stepAnchorPrice  = 0.0;     // Harga isi aktual tiket pertama agar TP/SL presisi 100%
+double            g_stepClosedNet    = 0.0;     // Akumulasi net dari tiket yang sudah tutup pada step ini
 long              g_stepLastReason   = -1;      // Alasan tutup utama pada step ini (TP/SL/SO)
 ulong             g_processedPos[];             // Daftar Position ID yang sudah dihitung agar tidak dobel
 
@@ -144,25 +138,25 @@ double            g_sessionNet       = 0.0;
 int OnInit()
 {
    if(InpLotMultiplier < 1.0 || InpMaxSteps < 0 || InpPriceInterval <= 0.0 ||
-      InpTargetDistance <= 0.0 || InpStartLot <= 0.0)
+      InpSLMoneyBase <= 0.0 || InpTPMoneyBase <= 0.0 || InpStartLot <= 0.0)
    {
-      Print("Mesin Uang: parameter tidak valid. Periksa lot, pengali, step, interval, dan jarak TP/SL.");
+      Print("Mesin Uang v9.00: parameter tidak valid. Periksa lot awal, SL $, TP $, dan pengali.");
       return(INIT_PARAMETERS_INCORRECT);
    }
 
    g_point    = _Point;
    g_digits   = _Digits;
-   g_gvPrefix = StringFormat("MU81_%s_%I64d_", _Symbol, InpMagicBot);
+   g_gvPrefix = StringFormat("MU90_%s_%I64d_", _Symbol, InpMagicBot);
 
    g_trade.SetExpertMagicNumber(InpMagicBot);
    g_trade.SetDeviationInPoints(InpSlippage);
    g_trade.SetTypeFilling(GetOptimalFilling(_Symbol));
 
-   if(InpDistMode == DIST_ATR || InpMinATRValue > 0.0)
+   if(InpMinATRValue > 0.0)
    {
       g_hATR = iATR(_Symbol, InpATRTF, InpATRPeriod);
       if(g_hATR == INVALID_HANDLE)
-         Print("Mesin Uang: ATR gagal dibuat, jarak TP/SL memakai nilai tetap.");
+         Print("Mesin Uang: ATR gagal dibuat, filter ATR dinonaktifkan.");
    }
    if(InpUseTrendFilter)
    {
@@ -175,7 +169,6 @@ int OnInit()
    g_currentBotLot   = CalcStartLot();
    g_pendingDir      = -1;
    g_lastPrice       = 0.0;
-   g_lastDist        = InpTargetDistance;
    g_cycleNet        = 0.0;
    g_stepAnchorPrice = 0.0;
    g_stepClosedNet   = 0.0;
@@ -185,7 +178,9 @@ int OnInit()
    g_dayStamp        = DayStamp(TimeCurrent());
    g_dayStartEquity  = AccountInfoDouble(ACCOUNT_EQUITY);
 
-   // Sinkronkan jam server sejak OnInit agar detik :00 pertama langsung tereksekusi
+   CalcPrecisionSLTPDist(g_lastSLDist, g_lastTPDist);
+
+   // Sinkronkan jam server sejak OnInit agar detik :00 berikutnya langsung tereksekusi
    SyncServerClock();
    datetime initSrv = GetEstimatedServerTime();
    g_lastSlot = (initSrv > 0) ? CalcBarSlot(initSrv, InpTriggerTF) : iTime(_Symbol, InpTriggerTF, 0);
@@ -204,20 +199,24 @@ int OnInit()
 
    SaveState();
 
-   // Diagnostik awal khusus broker (XM spread, trade mode, algo trading)
    double spreadPts = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / g_point;
    long   tradeMode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
-   PrintFormat("=== Mesin Uang Advanced v8.20 (XM Precision :00) Aktif | %s | Spread: %.0f/%.0f pts | Timer: %s ===",
-               _Symbol, spreadPts, (double)InpMaxSpreadPts,
-               (InpExactZeroTimer && !MQLInfoInteger(MQL_TESTER)) ? "ON (Detik :00)" : "OnTick");
+   double rrVal     = (g_lastSLDist > 0.0) ? (g_lastTPDist / g_lastSLDist) : 0.0;
+   double slPts     = g_lastSLDist / g_point;
+   double tpPts     = g_lastTPDist / g_point;
+
+   PrintFormat("=== Mesin Uang v9.00 (Precision Flip RR 1:%.2f) Aktif | %s | Lot0=%.2f | SL=$%.2f (%.*f / %.0f pts) | TP=$%.2f (%.*f / %.0f pts) | Spread=%.0f/%d pts ===",
+               rrVal, _Symbol, g_currentBotLot,
+               InpSLMoneyBase, g_digits, g_lastSLDist, slPts,
+               InpTPMoneyBase, g_digits, g_lastTPDist, tpPts,
+               spreadPts, InpMaxSpreadPts);
 
    if(tradeMode != SYMBOL_TRADE_MODE_FULL)
-      PrintFormat("[PERINGATAN XM] Simbol %s berstatus trade mode=%I64d (bukan FULL). Pastikan memakai simbol sesuai akun XM (mis. GOLD / GOLD# / GOLDmicro).",
+      PrintFormat("[PERINGATAN XM] Simbol %s berstatus trade mode=%I64d (bukan FULL). Pastikan memakai simbol sesuai akun XM (GOLD / GOLD# / GOLDmicro).",
                   _Symbol, tradeMode);
 
    if(InpMaxSpreadPts > 0 && spreadPts > InpMaxSpreadPts)
-      PrintFormat("[PERINGATAN SPREAD] Spread saat ini %.0f pts > InpMaxSpreadPts %d pts! Naikkan InpMaxSpreadPts agar bot tidak terblokir.",
-                  spreadPts, InpMaxSpreadPts);
+      PrintFormat("[PERINGATAN SPREAD] Spread saat ini %.0f pts > InpMaxSpreadPts %d pts!", spreadPts, InpMaxSpreadPts);
 
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
       Print("[PERINGATAN] Algo Trading belum aktif di MT5 atau di properti EA!");
@@ -233,7 +232,7 @@ void OnDeinit(const int reason)
    if(g_hMA  != INVALID_HANDLE) IndicatorRelease(g_hMA);
    if(MQLInfoInteger(MQL_TESTER)) GlobalVariablesDeleteAll(g_gvPrefix);
    Comment("");
-   Print("=== Mesin Uang v8.20 Dihentikan ===");
+   Print("=== Mesin Uang v9.00 Dihentikan ===");
 }
 
 //+------------------------------------------------------------------+
@@ -257,7 +256,7 @@ void ProcessEngine(bool fromTimer)
 
    if(InpEnableBot)
    {
-      // Kelola Auto Break-Even pada semua posisi aktif di step berjalan
+      // Kelola Auto Break-Even (hanya jika InpBEStartStep > 0)
       ManageBreakEven();
 
       if(g_pendingDir >= 0)
@@ -323,7 +322,7 @@ void SetTriggerInfo(string txt)
 }
 
 //+------------------------------------------------------------------+
-//| [5a] Pemicu Candle: Detik :00 Presisi + Filter Kualitas Candle   |
+//| [5a] Pemicu Candle: Detik :00 Presisi (1 Posisi Bersih)          |
 //+------------------------------------------------------------------+
 void CheckCandleTrigger(bool fromTimer)
 {
@@ -343,14 +342,15 @@ void CheckCandleTrigger(bool fromTimer)
    }
    if(curSlot <= g_lastSlot) return;
 
-   // Deteksi pergantian candle tepat di detik :00 (baik dari OnTick maupun OnTimer)
+   // Kunci slot candle agar tidak pernah double-entry di menit yang sama
    g_lastSlot = curSlot;
 
+   // Wajib 1 posisi bersih per step: jika sudah ada posisi aktif, abaikan sinyal baru
    if(CountPositions(InpMagicBot) > 0) return;
 
-   // Tentukan indeks candle yang BARU SAJA selesai:
-   // - Jika tick menit baru sudah masuk (bar0Time >= curSlot) -> candle selesai di shift 1
-   // - Jika dipicu Timer di detik :00 sebelum tick simbol ini masuk (bar0Time == curSlot - tfSec) -> candle selesai di shift 0
+   // Tentukan candle yang BARU SAJA tutup di detik :00:
+   // - bar0Time >= curSlot       -> tick menit baru sudah masuk, candle tutup ada di shift 1
+   // - bar0Time == curSlot-tfSec -> timer memicu tepat di :00 sebelum tick masuk, candle tutup ada di shift 0
    int shift = -1;
    if(bar0Time >= curSlot)
       shift = 1;
@@ -364,7 +364,7 @@ void CheckCandleTrigger(bool fromTimer)
       return;
    }
 
-   // Pastikan quote simbol ini masih segar (bukan market libur/tutup)
+   // Pastikan quote simbol masih segar (bukan market libur/tutup)
    datetime symTime = (datetime)SymbolInfoInteger(_Symbol, SYMBOL_TIME);
    if(!MQLInfoInteger(MQL_TESTER) && symTime > 0 && estNow > symTime && (estNow - symTime) > MathMax(180, tfSec * 2))
    {
@@ -391,16 +391,14 @@ void CheckCandleTrigger(bool fromTimer)
    if(InpMinCandleBody > 0.0 && body < InpMinCandleBody)
    {
       SetTriggerInfo(StringFormat("Skip: body %.*f < min %.*f", g_digits, body, g_digits, InpMinCandleBody));
-      if(InpVerbose) Print(StringFormat("Kotak dilewati: body %.*f < min %.*f (rawan sideways; set InpMinCandleBody=0 agar selalu entry).",
-                                        g_digits, body, g_digits, InpMinCandleBody));
+      if(InpVerbose) Print(StringFormat("Kotak dilewati: body %.*f < min %.*f.", g_digits, body, g_digits, InpMinCandleBody));
       return;
    }
 
    if(InpMinBodyRatio > 0.0 && range > 0.0 && (body / range) < InpMinBodyRatio)
    {
       SetTriggerInfo(StringFormat("Skip: rasio %.2f < %.2f", body / range, InpMinBodyRatio));
-      if(InpVerbose) Print(StringFormat("Kotak dilewati: rasio body/range %.2f < %.2f (ekor terlalu panjang; set InpMinBodyRatio=0 agar nonaktif).",
-                                        body / range, InpMinBodyRatio));
+      if(InpVerbose) Print(StringFormat("Kotak dilewati: rasio body/range %.2f < %.2f.", body / range, InpMinBodyRatio));
       return;
    }
 
@@ -414,11 +412,12 @@ void CheckCandleTrigger(bool fromTimer)
    }
 
    string srcTag = fromTimer ? "TIMER :00" : "TICK :00";
-   Print(StringFormat("[KOTAK %s | %s | shift=%d] Open %.*f Close %.*f (Body %.*f) -> %s",
-         isBuy ? "NAIK" : "TURUN", srcTag, shift, g_digits, o, g_digits, c, g_digits, body, isBuy ? "BUY" : "SELL"));
+   Print(StringFormat("[KOTAK %s | %s | shift=%d] Open %.*f Close %.*f (Body %.*f) -> %s Lot %.2f",
+         isBuy ? "NAIK" : "TURUN", srcTag, shift, g_digits, o, g_digits, c, g_digits, body,
+         isBuy ? "BUY" : "SELL", g_currentBotLot));
 
    if(OpenBotOrder(isBuy ? POSITION_TYPE_BUY : POSITION_TYPE_SELL, g_currentBotLot))
-      SetTriggerInfo(StringFormat("ENTRY %s (%s)", isBuy ? "BUY" : "SELL", srcTag));
+      SetTriggerInfo(StringFormat("ENTRY %s %.2f (%s)", isBuy ? "BUY" : "SELL", g_currentBotLot, srcTag));
    else
       SetTriggerInfo(StringFormat("GAGAL %s (kode %u)", isBuy ? "BUY" : "SELL", g_trade.ResultRetcode()));
 }
@@ -458,7 +457,7 @@ void CheckDirectionalCrossing()
       }
       Print(StringFormat("[CROSSING BUY] Melintas naik level %.*f", g_digits, levelUp));
       if(OpenBotOrder(POSITION_TYPE_BUY, g_currentBotLot))
-         SetTriggerInfo("ENTRY BUY (CROSSING)");
+         SetTriggerInfo(StringFormat("ENTRY BUY %.2f (CROSSING)", g_currentBotLot));
       return;
    }
 
@@ -475,7 +474,7 @@ void CheckDirectionalCrossing()
       }
       Print(StringFormat("[CROSSING SELL] Melintas turun level %.*f", g_digits, levelDown));
       if(OpenBotOrder(POSITION_TYPE_SELL, g_currentBotLot))
-         SetTriggerInfo("ENTRY SELL (CROSSING)");
+         SetTriggerInfo(StringFormat("ENTRY SELL %.2f (CROSSING)", g_currentBotLot));
       return;
    }
 
@@ -501,7 +500,7 @@ string BlockReason(bool isBuy)
    if(!InTradingHours())  return "di luar jam trading";
    string d = DailyBlock();
    if(d != "")            return d;
-   if(!VolatilityOK())    return "volatilitas ATR terlalu rendah (sideways)";
+   if(!VolatilityOK())    return "volatilitas ATR terlalu rendah";
    if(!TrendOK(isBuy))    return "melawan tren/kemiringan EMA";
    return "";
 }
@@ -573,8 +572,111 @@ int DayStamp(datetime t)
 }
 
 //+------------------------------------------------------------------+
-//| [7] Order Lanjutan (Martingale / Searah)                         |
+//| [7] Perhitungan Presisi Uang <-> Harga & Lot Flip Martingale     |
 //+------------------------------------------------------------------+
+double GetMoneyPerPriceUnit1Lot()
+{
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(bid <= 0.0) bid = 1000.0;
+
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double testStep = MathMax(g_point * 100.0, tickSize * 10.0);
+   if(testStep <= 0.0) testStep = 1.0;
+
+   double prof = 0.0;
+   if(OrderCalcProfit(ORDER_TYPE_BUY, _Symbol, 1.0, bid, bid + testStep, prof) && prof > 0.0)
+      return prof / testStep;
+
+   double tickVal = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickVal > 0.0 && tickSize > 0.0)
+      return tickVal / tickSize;
+
+   return 100.0;
+}
+
+// Konversi SL $3 & TP $6 bersih (untuk Lot Awal) menjadi jarak harga presisi
+void CalcPrecisionSLTPDist(double &outSLDist, double &outTPDist)
+{
+   double baseLot = NormalizeSingleOrderLot(InpStartLot);
+   if(baseLot <= 0.0) baseLot = 0.01;
+
+   double moneyPerPrice1Lot = GetMoneyPerPriceUnit1Lot();
+   double moneyPerPriceBase = moneyPerPrice1Lot * baseLot;
+   if(moneyPerPriceBase <= 0.0) moneyPerPriceBase = 1.0;
+
+   double commBase = MathMax(0.0, InpCommissionPerLot) * baseLot;
+   double slGross  = MathMax(0.01, InpSLMoneyBase - commBase);
+   double tpGross  = MathMax(0.01, InpTPMoneyBase + commBase);
+
+   double rawSL = slGross / moneyPerPriceBase;
+   double rawTP = tpGross / moneyPerPriceBase;
+
+   // Pengaman batas minimal StopsLevel + Spread broker (untuk $3 di XM Gold tidak akan tersentuh)
+   double stopLvl = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * g_point;
+   double spread  = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double minDist = stopLvl + spread + 2.0 * g_point;
+
+   if(rawSL < minDist)
+   {
+      double rr = (InpSLMoneyBase > 0.0) ? (InpTPMoneyBase / InpSLMoneyBase) : 2.0;
+      rawSL = minDist;
+      rawTP = MathMax(rawTP, rawSL * rr);
+   }
+
+   outSLDist = NormalizeDouble(rawSL, g_digits);
+   outTPDist = NormalizeDouble(rawTP, g_digits);
+}
+
+// Estimasi nilai bersih TP ($) per 1.00 lot untuk jarak TP berjalan
+double GetNetTPMoneyPer1Lot(double tpDist)
+{
+   double grossPer1Lot = tpDist * GetMoneyPerPriceUnit1Lot();
+   double netPer1Lot   = grossPer1Lot - MathMax(0.0, InpCommissionPerLot);
+   return MathMax(0.01, netPer1Lot);
+}
+
+// Estimasi nilai bersih SL ($) per 1.00 lot untuk jarak SL berjalan
+double GetNetSLMoneyPer1Lot(double slDist)
+{
+   double grossPer1Lot = slDist * GetMoneyPerPriceUnit1Lot();
+   return grossPer1Lot + MathMax(0.0, InpCommissionPerLot);
+}
+
+// Hitung lot Flip Martingale berikutnya secara presisi
+double CalcNextFlipLot(double prevLot, double realizedCycleNet)
+{
+   double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(stepLot <= 0.0) stepLot = 0.01;
+
+   double nextLot = prevLot;
+
+   if(InpLotMode == LOT_PRECISION_RECOVERY)
+   {
+      double slDist = 0.0, tpDist = 0.0;
+      CalcPrecisionSLTPDist(slDist, tpDist);
+
+      double tpNetPer1Lot = GetNetTPMoneyPer1Lot(tpDist);
+      double targetProfit = (InpCycleTargetUSD > 0.0) ? InpCycleTargetUSD : InpTPMoneyBase;
+      double lossToCover  = (realizedCycleNet < 0.0) ? MathAbs(realizedCycleNet) : 0.0;
+
+      // Rumus Presisi RR 1:2: Lot = Ceil((|Akumulasi Rugi| + Target Profit) / TP_Bersih_Per_1Lot)
+      // Contoh SL $3 / TP $6 (Target $6): 0.01 -> 0.02 -> 0.03 -> 0.04 -> 0.06 -> 0.09 -> 0.14 -> 0.21 ...
+      double exactNeed = (lossToCover + targetProfit) / tpNetPer1Lot;
+      nextLot = CeilTotalLot(exactNeed);
+   }
+   else
+   {
+      // Mode Pengali Tetap (mis. 1.5x atau 2.0x)
+      nextLot = CeilTotalLot(prevLot * InpLotMultiplier);
+   }
+
+   // Pastikan lot progresif (minimal naik 1 step lot bila masih sama)
+   if(nextLot <= prevLot + 1e-9)
+      nextLot = CeilTotalLot(prevLot + stepLot);
+
+   return nextLot;
+}
+
 void ResetCycleToStep1()
 {
    g_pendingDir      = -1;
@@ -635,7 +737,7 @@ void ProcessPending()
 }
 
 //+------------------------------------------------------------------+
-//| [8] Transaksi: Kalibrasi & Basket Split-Order Martingale         |
+//| [8] Transaksi: Kalibrasi Presisi & Flip Martingale               |
 //+------------------------------------------------------------------+
 bool IsPosProcessed(ulong posId)
 {
@@ -690,7 +792,6 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
    if(dealEntry == DEAL_ENTRY_IN)
    {
       double exactPrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
-      // Simpan harga tiket pertama di step ini agar seluruh pecahan order punya level TP/SL yang identik
       if(g_stepAnchorPrice <= 0.0)
          g_stepAnchorPrice = exactPrice;
 
@@ -702,7 +803,6 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
    if(dealEntry == DEAL_ENTRY_OUT || dealEntry == DEAL_ENTRY_INOUT)
    {
       if(posId == 0 || IsPosProcessed(posId)) return;
-      // Pastikan tiket posisi ini sudah tertutup penuh
       if(PositionSelectByTicket(posId)) return;
 
       MarkPosProcessed(posId);
@@ -722,8 +822,7 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
       else if(reason == DEAL_REASON_TP && g_stepLastReason != DEAL_REASON_SO && g_stepLastReason != DEAL_REASON_SL)
          g_stepLastReason = reason;
 
-      // PENTING: Jika pada Step ini ada beberapa order pecahan (mis. 2x 81.92),
-      // tunggu sampai SEMUA posisi pada Step ini selesai tertutup baru evaluasi kenaikan Step!
+      // Tunggu sampai seluruh posisi pada step ini benar-benar tertutup
       if(g_isOpeningBasket || CountPositions(InpMagicBot) > 0)
          return;
 
@@ -770,20 +869,20 @@ void FinalizeClosedStep(ENUM_POSITION_TYPE origType)
    g_stepLastReason  = -1;
    g_stepAnchorPrice = 0.0;
 
-   // [A] Kena TP, atau kena SL dalam kondisi Profit/Break-Even yang sudah menutup kerugian siklus
+   // [A] Kena TP, atau kena SL Break-Even yang sudah menutup kerugian siklus
    if(reason == DEAL_REASON_TP || (reason == DEAL_REASON_SL && stepNet >= 0.0 && g_cycleNet >= 0.0))
    {
       g_cntTP++;
-      int finishedStep = g_currentStep;
+      int    finishedStep     = g_currentStep;
       double totalCycleProfit = g_cycleNet;
 
       ResetCycleToStep1();
 
       if(InpAfterTPMode == AFTER_TP_WAIT_SIGNAL)
       {
-         string msg = StringFormat("[STEP %d TP SELESAI] Profit Step: %.2f | Total Siklus: %.2f. Kembali STANDBY tunggu sinyal.",
+         string msg = StringFormat("[STEP %d TP SELESAI] Profit Step: $%+.2f | Net Siklus: $%+.2f. Reset Step 1 & standby detik :00.",
                                    finishedStep, stepNet, totalCycleProfit);
-         SetTriggerInfo("TP selesai — standby detik :00");
+         SetTriggerInfo(StringFormat("TP $%+.2f (Siklus $%+.2f) -> Standby :00", stepNet, totalCycleProfit));
          Print(msg);
          if(InpEnableAlert) Alert(msg);
          return;
@@ -793,7 +892,7 @@ void FinalizeClosedStep(ENUM_POSITION_TYPE origType)
       string why = BlockReason(isBuy);
       if(why != "")
       {
-         string msg = StringFormat("[STEP %d TP SELESAI] Total Siklus: %.2f. Stop antrean baru karena: %s.",
+         string msg = StringFormat("[STEP %d TP SELESAI] Net Siklus: $%+.2f. Stop lanjut karena: %s.",
                                    finishedStep, totalCycleProfit, why);
          SetTriggerInfo("TP selesai — stop: " + why);
          Print(msg);
@@ -801,25 +900,25 @@ void FinalizeClosedStep(ENUM_POSITION_TYPE origType)
          return;
       }
 
-      string msg = StringFormat("[STEP %d TP] Hasil bersih %.2f (Siklus %.2f). Reset ke Step 1, lanjut searah.",
+      string msg = StringFormat("[STEP %d TP] Hasil $%+.2f (Net Siklus $%+.2f). Reset Step 1, lanjut searah.",
                                 finishedStep, stepNet, totalCycleProfit);
-      SetTriggerInfo("TP selesai — lanjut searah Step 1");
+      SetTriggerInfo(StringFormat("TP $%+.2f -> Lanjut searah Step 1", totalCycleProfit));
       Print(msg);
       if(InpEnableAlert) Alert(msg);
 
       StartOrQueue(origType);
    }
-   // [B] Kena SL saat Break-Even (stepNet >= 0), tetapi akumulasi siklus masih rugi -> Tahan Step & Lot!
+   // [B] Kena SL Break-Even (stepNet >= 0), tetapi siklus masih minus -> Tahan Step & Lot!
    else if(reason == DEAL_REASON_SL && stepNet >= 0.0 && g_cycleNet < 0.0)
    {
-      string msg = StringFormat("[STEP %d BREAK-EVEN] Step impas (+%.2f), sisa rugi siklus %.2f. Tahan di Step %d (Lot %.2f).",
+      string msg = StringFormat("[STEP %d BREAK-EVEN] Step impas ($%+.2f), sisa siklus $%+.2f. Tahan Step %d (Lot %.2f).",
                                 g_currentStep, stepNet, g_cycleNet, g_currentStep, g_currentBotLot);
       SetTriggerInfo(StringFormat("BE Step %d — tahan lot %.2f", g_currentStep, g_currentBotLot));
       Print(msg);
       if(InpEnableAlert) Alert(msg);
       StartOrQueue(origType);
    }
-   // [C] Kena SL Rugi Normal -> Lipat Lot (Tanpa Terpotong MaxLotPerOrder!) + Balik Arah
+   // [C] Kena SL Rugi Normal -> Hitung Lot Presisi + Langsung FLIP Balik Arah (BUY <-> SELL)
    else if(reason == DEAL_REASON_SL)
    {
       g_cntSL++;
@@ -830,7 +929,7 @@ void FinalizeClosedStep(ENUM_POSITION_TYPE origType)
          string dBlock = DailyBlock();
          if(dBlock != "")
          {
-            string msg = StringFormat("[HARD STOP HARIAN] Step %d SL (%.2f) menyentuh %s. Siklus dihentikan & reset ke Step 1!",
+            string msg = StringFormat("[HARD STOP HARIAN] Step %d SL ($%+.2f) menyentuh %s. Siklus dihentikan & reset ke Step 1!",
                                       slStep, stepNet, dBlock);
             SetTriggerInfo("Hard Stop: " + dBlock);
             Print(msg);
@@ -845,32 +944,36 @@ void FinalizeClosedStep(ENUM_POSITION_TYPE origType)
       if(!capped)
       {
          g_currentStep++;
-         // PENTING: Gunakan NormalizeTotalLot (tidak dipotong SYMBOL_VOLUME_MAX)
-         // sehingga setelah 81.92 kena SL, g_currentBotLot naik menjadi 163.84!
-         g_currentBotLot = NormalizeTotalLot(g_currentBotLot * InpLotMultiplier);
+         g_currentBotLot = CalcNextFlipLot(g_currentBotLot, g_cycleNet);
       }
       if(g_currentStep > g_maxStepReached) g_maxStepReached = g_currentStep;
 
-      double maxChunk = GetMaxLotPerTicket();
-      int    chunks   = (int)MathCeil((g_currentBotLot - 1e-8) / maxChunk);
+      ENUM_POSITION_TYPE flipDir = (origType == POSITION_TYPE_BUY) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+      double estSLUsd = g_currentBotLot * GetNetSLMoneyPer1Lot(g_lastSLDist);
+      double estTPUsd = g_currentBotLot * GetNetTPMoneyPer1Lot(g_lastTPDist);
+      double estNetTP = g_cycleNet + estTPUsd;
 
       string msg = capped
-         ? StringFormat("[STEP %d SL] Bersih %.2f (Siklus %.2f). Step maks: lot ditahan %.2f (%d order), balik arah.",
-                        slStep, stepNet, g_cycleNet, g_currentBotLot, chunks)
-         : StringFormat("[STEP %d SL] Bersih %.2f (Siklus %.2f). Balik arah ke Step %d -> Total Lot %.2f (%d order).",
-                        slStep, stepNet, g_cycleNet, g_currentStep, g_currentBotLot, chunks);
-      SetTriggerInfo(StringFormat("FLIP ke Step %d (Lot %.2f)", g_currentStep, g_currentBotLot));
+         ? StringFormat("[STEP %d SL] Hasil $%+.2f (Siklus $%+.2f). Step maks: FLIP %s Lot %.2f (SL -$%.2f / TP +$%.2f).",
+                        slStep, stepNet, g_cycleNet, (flipDir == POSITION_TYPE_BUY) ? "BUY" : "SELL",
+                        g_currentBotLot, estSLUsd, estTPUsd)
+         : StringFormat("[STEP %d SL] Hasil $%+.2f (Siklus $%+.2f). FLIP %s Step %d Lot %.2f (SL -$%.2f | TP +$%.2f | Est Net TP $%+.2f).",
+                        slStep, stepNet, g_cycleNet, (flipDir == POSITION_TYPE_BUY) ? "BUY" : "SELL",
+                        g_currentStep, g_currentBotLot, estSLUsd, estTPUsd, estNetTP);
+
+      SetTriggerInfo(StringFormat("FLIP %s S%d Lot %.2f (Est TP $%+.2f)",
+                                  (flipDir == POSITION_TYPE_BUY) ? "BUY" : "SELL", g_currentStep, g_currentBotLot, estNetTP));
       Print(msg);
       if(InpEnableAlert) Alert(msg);
       if(InpEnablePush && capped) SendNotification(msg);
 
-      StartOrQueue((origType == POSITION_TYPE_BUY) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY);
+      StartOrQueue(flipDir);
    }
    // [D] Stop Out / Ditutup Manual
    else
    {
       string why = (reason == DEAL_REASON_SO) ? "STOP OUT oleh broker" : "ditutup manual/sebab lain";
-      string msg = StringFormat("Posisi %s (hasil bersih %.2f). Siklus direset ke Step 1.", why, stepNet);
+      string msg = StringFormat("Posisi %s (hasil bersih $%+.2f). Siklus direset ke Step 1.", why, stepNet);
       SetTriggerInfo("Reset Step 1 (" + why + ")");
       Print(msg);
       if(InpEnableAlert) Alert(msg);
@@ -881,7 +984,7 @@ void FinalizeClosedStep(ENUM_POSITION_TYPE origType)
 }
 
 //+------------------------------------------------------------------+
-//| [9] Kalibrasi TP/SL Pasca-Eksekusi & Auto Break-Even             |
+//| [9] Kalibrasi SL/TP Presisi Pasca-Eksekusi & Break-Even          |
 //+------------------------------------------------------------------+
 void CalibratePositionTPSL(ulong posTicket, double anchorPrice, ENUM_POSITION_TYPE posType)
 {
@@ -889,15 +992,16 @@ void CalibratePositionTPSL(ulong posTicket, double anchorPrice, ENUM_POSITION_TY
 
    double bid     = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask     = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double spread  = ask - bid;
    double stopLvl = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * g_point;
-   double dist    = (g_lastDist > 0.0) ? g_lastDist : InpTargetDistance;
-   double tpDist  = (dist * GetRR()) + (InpCompensateSpread ? spread : 0.0);
+
+   // Gunakan jarak SL ($3) & TP ($6) presisi TANPA double-spread!
+   // Karena OpenPrice BUY = Ask dan SELL = Bid, jarak OpenPrice +- SL/TP menghasilkan nilai $ bersih yang presisi.
+   double slDist  = g_lastSLDist;
+   double tpDist  = g_lastTPDist;
 
    double exactTP = (posType == POSITION_TYPE_BUY) ? (anchorPrice + tpDist) : (anchorPrice - tpDist);
-   double exactSL = (posType == POSITION_TYPE_BUY) ? (anchorPrice - dist)   : (anchorPrice + dist);
+   double exactSL = (posType == POSITION_TYPE_BUY) ? (anchorPrice - slDist) : (anchorPrice + slDist);
 
-   // Pastikan jarak SL/TP tidak melanggar StopsLevel XM setelah slippage eksekusi
    double safePad = stopLvl + 2.0 * g_point;
    if(posType == POSITION_TYPE_BUY)
    {
@@ -920,8 +1024,10 @@ void CalibratePositionTPSL(ulong posTicket, double anchorPrice, ENUM_POSITION_TY
    {
       g_trade.SetExpertMagicNumber(InpMagicBot);
       if(g_trade.PositionModify(posTicket, exactSL, exactTP) && RetcodeOK(g_trade.ResultRetcode()))
-         Print(StringFormat("[KALIBRASI] Tiket #%I64u | Anchor %.*f | TP %.*f | SL %.*f",
-                            posTicket, g_digits, anchorPrice, g_digits, exactTP, g_digits, exactSL));
+         Print(StringFormat("[KALIBRASI PRESISI] Tiket #%I64u | Open %.*f | SL %.*f (-%.*f) | TP %.*f (+%.*f)",
+                            posTicket, g_digits, anchorPrice,
+                            g_digits, exactSL, g_digits, slDist,
+                            g_digits, exactTP, g_digits, tpDist));
       else
          Print(StringFormat("Kalibrasi tiket #%I64u gagal (kode %u), TP/SL awal dipertahankan.",
                             posTicket, g_trade.ResultRetcode()));
@@ -987,39 +1093,8 @@ void ManageBreakEven()
 }
 
 //+------------------------------------------------------------------+
-//| [10] Eksekutor Order (Support Pecah Lot + Fast Retry XM)         |
+//| [10] Eksekutor Order Standar (Fix Anti-Tumpuk + Fast Retry XM)   |
 //+------------------------------------------------------------------+
-double GetBaseDist()
-{
-   if(InpDistMode == DIST_ATR && g_hATR != INVALID_HANDLE)
-   {
-      double a[];
-      ArraySetAsSeries(a, true);
-      if(CopyBuffer(g_hATR, 0, 1, 1, a) == 1 && a[0] > 0.0)
-         return a[0] * InpATRMultiplier;
-   }
-   return InpTargetDistance;
-}
-
-double GetRR()
-{
-   switch(InpRRMode)
-   {
-      case RR_1_2:    return 2.0;
-      case RR_1_3:    return 3.0;
-      case RR_CUSTOM: return MathMax(0.1, InpCustomRR);
-      default:        return 1.0;
-   }
-}
-
-double GetDist()
-{
-   double stopLvl = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * g_point;
-   double spread  = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double need    = stopLvl + spread + 2.0 * g_point;
-   return MathMax(GetBaseDist(), need);
-}
-
 double GetMaxLotPerTicket()
 {
    double brokerMax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
@@ -1028,7 +1103,6 @@ double GetMaxLotPerTicket()
    return NormalizeSingleOrderLot(maxTicket);
 }
 
-// Hitung berapa lot maksimal yang muat dengan Free Margin saat ini
 double CalcMaxAffordableLot(ENUM_ORDER_TYPE orderType, double price, double desiredLot)
 {
    if(HasMargin(orderType, desiredLot, price))
@@ -1057,21 +1131,26 @@ bool IsRetryableRetcode(uint code)
 
 bool OpenBotOrder(ENUM_POSITION_TYPE type, double totalLot)
 {
+   // GUARD WAJIB: Mencegah order ganda / bertumpuk!
+   if(g_isOpeningBasket || CountPositions(InpMagicBot) > 0)
+      return false;
+
    totalLot = NormalizeTotalLot(totalLot);
    double minLot    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double maxTicket = GetMaxLotPerTicket();
+   if(totalLot < minLot) return false;
 
-   double spread = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double dist   = NormalizeDouble(GetDist(), g_digits);
-   double tpDist = NormalizeDouble((dist * GetRR()) + (InpCompensateSpread ? spread : 0.0), g_digits);
+   double slDist = 0.0, tpDist = 0.0;
+   CalcPrecisionSLTPDist(slDist, tpDist);
 
-   g_lastDist        = dist;
+   g_lastSLDist      = slDist;
+   g_lastTPDist      = tpDist;
    g_stepAnchorPrice = 0.0;
    g_stepClosedNet   = 0.0;
    g_stepLastReason  = -1;
    SaveState();
 
-   // Hitung jumlah pecahan order (misal 163.84 dengan batas 81.92 -> 2 order @ 81.92)
+   // Untuk lot standar <= 81.92, totalParts SELALU = 1 (1 order bersih!)
    int totalParts = (int)MathCeil((totalLot - 1e-8) / maxTicket);
    if(totalParts < 1) totalParts = 1;
 
@@ -1080,18 +1159,18 @@ bool OpenBotOrder(ENUM_POSITION_TYPE type, double totalLot)
    double openedLots = 0.0;
    int    partIdx    = 1;
 
-   // Anchor SL & TP awal dari harga saat mulai menembak keranjang
    double refPrice = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
                                                  : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double slPrice  = (type == POSITION_TYPE_BUY) ? NormalizeDouble(refPrice - dist, g_digits)
-                                                 : NormalizeDouble(refPrice + dist, g_digits);
+   double slPrice  = (type == POSITION_TYPE_BUY) ? NormalizeDouble(refPrice - slDist, g_digits)
+                                                 : NormalizeDouble(refPrice + slDist, g_digits);
    double tpPrice  = (type == POSITION_TYPE_BUY) ? NormalizeDouble(refPrice + tpDist, g_digits)
                                                  : NormalizeDouble(refPrice - tpDist, g_digits);
 
    int maxFastTry = MathMax(0, InpEntryFastRetries);
    g_isOpeningBasket = true;
 
-   while(remLot >= minLot - 1e-8 && !IsStopped())
+   // Safety cap partIdx <= totalParts memastikan MUSTAHIL terjadi infinite loop!
+   while(remLot >= minLot - 1e-8 && partIdx <= totalParts && !IsStopped())
    {
       double chunkLot = NormalizeSingleOrderLot(MathMin(remLot, maxTicket));
       if(chunkLot < minLot) break;
@@ -1107,14 +1186,14 @@ bool OpenBotOrder(ENUM_POSITION_TYPE type, double totalLot)
             double afford = CalcMaxAffordableLot(ordType, curPrice, chunkLot);
             if(afford >= minLot)
             {
-               Print(StringFormat("[PENYESUAIAN MARGIN] Margin tidak cukup untuk %.2f lot, disesuaikan ke %.2f lot agar tidak reset.",
+               Print(StringFormat("[PENYESUAIAN MARGIN] Margin tidak cukup untuk %.2f lot, disesuaikan ke %.2f lot.",
                                   chunkLot, afford));
                chunkLot = afford;
-               remLot   = chunkLot; // Habiskan sisa ke lot maksimal yang muat
+               remLot   = chunkLot; // Selesaikan pada chunk terakhir yang muat
             }
             else
             {
-               Print("Margin bebas tidak cukup untuk membuka tambahan pecahan order (sisa ", DoubleToString(remLot, 2), " lot).");
+               Print("Margin bebas tidak cukup untuk membuka lot ", DoubleToString(remLot, 2));
                break;
             }
          }
@@ -1139,12 +1218,11 @@ bool OpenBotOrder(ENUM_POSITION_TYPE type, double totalLot)
                                                    : SymbolInfoDouble(_Symbol, SYMBOL_BID);
             if(openedCnt == 0)
             {
-               spread  = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
-               dist    = NormalizeDouble(GetDist(), g_digits);
-               tpDist  = NormalizeDouble((dist * GetRR()) + (InpCompensateSpread ? spread : 0.0), g_digits);
-               g_lastDist = dist;
-               slPrice = (type == POSITION_TYPE_BUY) ? NormalizeDouble(curPrice - dist, g_digits)
-                                                     : NormalizeDouble(curPrice + dist, g_digits);
+               CalcPrecisionSLTPDist(slDist, tpDist);
+               g_lastSLDist = slDist;
+               g_lastTPDist = tpDist;
+               slPrice = (type == POSITION_TYPE_BUY) ? NormalizeDouble(curPrice - slDist, g_digits)
+                                                     : NormalizeDouble(curPrice + slDist, g_digits);
                tpPrice = (type == POSITION_TYPE_BUY) ? NormalizeDouble(curPrice + tpDist, g_digits)
                                                      : NormalizeDouble(curPrice - tpDist, g_digits);
             }
@@ -1169,12 +1247,12 @@ bool OpenBotOrder(ENUM_POSITION_TYPE type, double totalLot)
 
          if(attempt < maxFastTry && IsRetryableRetcode(rc))
          {
-            Print(StringFormat("[RETRY %d/%d] Pecahan #%d (%.2f lot) kode %u (%s), mencoba ulang...",
+            Print(StringFormat("[RETRY %d/%d] Order #%d (%.2f lot) kode %u (%s), mencoba ulang...",
                                attempt + 1, maxFastTry, partIdx, chunkLot, rc, g_trade.ResultRetcodeDescription()));
             continue;
          }
 
-         Print(StringFormat("Order pecahan #%d (%.2f lot) gagal. Kode: %u (%s)",
+         Print(StringFormat("Order #%d (%.2f lot) gagal. Kode: %u (%s)",
                             partIdx, chunkLot, rc, g_trade.ResultRetcodeDescription()));
          break;
       }
@@ -1184,7 +1262,10 @@ bool OpenBotOrder(ENUM_POSITION_TYPE type, double totalLot)
 
       openedCnt++;
       openedLots += chunkLot;
-      remLot = NormalizeTotalLot(remLot - chunkLot);
+
+      // FIX BUG v8.10: Gunakan NormalizeRemainingLot (BOLEH mengembalikan 0.0!)
+      // Sebelumnya NormalizeTotalLot(0.0) memaksa naik ke 0.01 sehingga loop menembak 0.01 terus-menerus!
+      remLot = NormalizeRemainingLot(remLot - chunkLot);
       partIdx++;
    }
 
@@ -1210,7 +1291,8 @@ void SaveState()
    GlobalVariableSet(g_gvPrefix + "step",     (double)g_currentStep);
    GlobalVariableSet(g_gvPrefix + "lot",      g_currentBotLot);
    GlobalVariableSet(g_gvPrefix + "pending",  (double)g_pendingDir);
-   GlobalVariableSet(g_gvPrefix + "dist",     g_lastDist);
+   GlobalVariableSet(g_gvPrefix + "sldist",   g_lastSLDist);
+   GlobalVariableSet(g_gvPrefix + "tpdist",   g_lastTPDist);
    GlobalVariableSet(g_gvPrefix + "cyclenet", g_cycleNet);
    GlobalVariableSet(g_gvPrefix + "daystamp", (double)g_dayStamp);
    GlobalVariableSet(g_gvPrefix + "dayeq",    g_dayStartEquity);
@@ -1246,11 +1328,12 @@ void LoadState()
    g_currentStep   = step;
    g_currentBotLot = NormalizeTotalLot(lot);
    g_pendingDir    = (!hasPos && fresh && pend >= 0 && pend <= 1) ? pend : -1;
-   if(GlobalVariableCheck(g_gvPrefix + "dist"))     g_lastDist = GlobalVariableGet(g_gvPrefix + "dist");
-   if(GlobalVariableCheck(g_gvPrefix + "cyclenet")) g_cycleNet = GlobalVariableGet(g_gvPrefix + "cyclenet");
+   if(GlobalVariableCheck(g_gvPrefix + "sldist"))   g_lastSLDist = GlobalVariableGet(g_gvPrefix + "sldist");
+   if(GlobalVariableCheck(g_gvPrefix + "tpdist"))   g_lastTPDist = GlobalVariableGet(g_gvPrefix + "tpdist");
+   if(GlobalVariableCheck(g_gvPrefix + "cyclenet")) g_cycleNet   = GlobalVariableGet(g_gvPrefix + "cyclenet");
    if(g_currentStep > g_maxStepReached) g_maxStepReached = g_currentStep;
 
-   Print(StringFormat("State v8.20 dipulihkan: Step %d, Total Lot %.2f, Siklus %.2f, Pending=%d",
+   Print(StringFormat("State v9.00 dipulihkan: Step %d, Lot %.2f, Siklus $%+.2f, Pending=%d",
                       g_currentStep, g_currentBotLot, g_cycleNet, g_pendingDir));
 }
 
@@ -1327,36 +1410,66 @@ ENUM_ORDER_TYPE_FILLING GetOptimalFilling(string symbol)
    return ORDER_FILLING_RETURN;
 }
 
+int GetLotDigits(double stepLot)
+{
+   int dig = 0;
+   double s = stepLot;
+   while(dig < 8 && MathAbs(s - MathRound(s)) > 1e-8) { s *= 10.0; dig++; }
+   return dig;
+}
+
 // Normalisasi untuk 1 tiket order (dibatasi SYMBOL_VOLUME_MAX broker)
 double NormalizeSingleOrderLot(double lot)
 {
    double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   if(stepLot <= 0) stepLot = 0.01;
+   if(stepLot <= 0.0) stepLot = 0.01;
 
-   int dig = 0;
-   double s = stepLot;
-   while(dig < 8 && MathAbs(s - MathRound(s)) > 1e-8) { s *= 10.0; dig++; }
-
+   int dig = GetLotDigits(stepLot);
    lot = MathMax(lot, minLot);
    if(maxLot > 0.0) lot = MathMin(lot, maxLot);
    return NormalizeDouble(MathRound(lot / stepLot) * stepLot, dig);
 }
 
-// Normalisasi untuk Total Lot Martingale (TIDAK dibatasi SYMBOL_VOLUME_MAX agar bisa > 81.92 / 163.84+)
+// Normalisasi Total Lot Martingale (pembulatan terdekat, minimal minLot)
 double NormalizeTotalLot(double lot)
 {
    double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   if(stepLot <= 0) stepLot = 0.01;
+   if(stepLot <= 0.0) stepLot = 0.01;
 
-   int dig = 0;
-   double s = stepLot;
-   while(dig < 8 && MathAbs(s - MathRound(s)) > 1e-8) { s *= 10.0; dig++; }
-
+   int dig = GetLotDigits(stepLot);
    lot = MathMax(lot, minLot);
    return NormalizeDouble(MathRound(lot / stepLot) * stepLot, dig);
+}
+
+// Pembulatan KE ATAS ke kelipatan stepLot agar profit recovery TIDAK PERNAH kurang dari target
+double CeilTotalLot(double lot)
+{
+   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(stepLot <= 0.0) stepLot = 0.01;
+
+   int dig = GetLotDigits(stepLot);
+   if(lot < minLot) return NormalizeDouble(minLot, dig);
+   double units = MathCeil((lot / stepLot) - 1e-9);
+   return NormalizeDouble(units * stepLot, dig);
+}
+
+// Normalisasi sisa lot pada split-order (WAJIB bisa kembali 0.0 agar loop berhenti bersih!)
+double NormalizeRemainingLot(double lot)
+{
+   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(stepLot <= 0.0) stepLot = 0.01;
+
+   if(lot < minLot - 1e-8)
+      return 0.0;
+
+   int dig = GetLotDigits(stepLot);
+   double res = NormalizeDouble(MathRound(lot / stepLot) * stepLot, dig);
+   return (res < minLot - 1e-8) ? 0.0 : res;
 }
 
 //+------------------------------------------------------------------+
@@ -1380,7 +1493,7 @@ void UpdateChartComment()
    else if(SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE) != SYMBOL_TRADE_MODE_FULL)
       status = "SIMBOL TRADE DISABLED (CEK SIMBOL XM!)";
    else if(g_pendingDir >= 0)
-      status = StringFormat("MENUNGGU EKSEKUSI STEP %d (Lot %.2f - %s)", g_currentStep, g_currentBotLot, (g_pendingDir == 0) ? "BUY" : "SELL");
+      status = StringFormat("MENUNGGU FLIP STEP %d (Lot %.2f - %s)", g_currentStep, g_currentBotLot, (g_pendingDir == 0) ? "BUY" : "SELL");
    else if(posCount == 0)
    {
       string d = DailyBlock();
@@ -1392,43 +1505,51 @@ void UpdateChartComment()
                   : "STANDBY (menunggu crossing level)";
    }
    else if(posCount > 1)
-      status = StringFormat("AKTIF - STEP %d (Total Lot: %.2f | %d Order)", g_currentStep, openLots, posCount);
+      status = StringFormat("AKTIF - STEP %d (Total Lot: %.2f | %d Tiket)", g_currentStep, openLots, posCount);
    else
-      status = StringFormat("AKTIF - STEP %d (Lot: %.2f)", g_currentStep, openLots);
+      status = StringFormat("AKTIF - STEP %d (1 Posisi | Lot: %.2f)", g_currentStep, openLots);
+
+   double liveSLDist = 0.0, liveTPDist = 0.0;
+   CalcPrecisionSLTPDist(liveSLDist, liveTPDist);
+   double showSLDist = (posCount > 0) ? g_lastSLDist : liveSLDist;
+   double showTPDist = (posCount > 0) ? g_lastTPDist : liveTPDist;
+   double activeLot  = (posCount > 0) ? openLots : g_currentBotLot;
+
+   double stepSLUsd  = activeLot * GetNetSLMoneyPer1Lot(showSLDist);
+   double stepTPUsd  = activeLot * GetNetTPMoneyPer1Lot(showTPDist);
+   double estNetTP   = g_cycleNet + stepTPUsd;
+   double rrVal      = (showSLDist > 0.0) ? (showTPDist / showSLDist) : 0.0;
 
    string stepLimit = (InpMaxSteps > 0) ? IntegerToString(InpMaxSteps) : "tanpa batas";
-   string distTxt   = (InpDistMode == DIST_ATR)
-                      ? StringFormat("ATR x %.2f (sekarang %s)", InpATRMultiplier, DoubleToString(GetBaseDist(), g_digits))
-                      : DoubleToString(InpTargetDistance, g_digits);
+   string lotModeTx = (InpLotMode == LOT_PRECISION_RECOVERY) ? "Presisi RR 1:2 (Auto)" : StringFormat("Pengali %.2fx", InpLotMultiplier);
    double spreadPts = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / g_point;
    string spStatus  = (InpMaxSpreadPts > 0 && spreadPts > InpMaxSpreadPts) ? " [TERBLOKIR!]" : " [OK]";
    double dayPct    = (g_dayStartEquity > 0.0) ? (AccountInfoDouble(ACCOUNT_EQUITY) - g_dayStartEquity) / g_dayStartEquity * 100.0 : 0.0;
    int    total     = g_cntTP + g_cntSL;
    double winRate   = (total > 0) ? (100.0 * g_cntTP / total) : 0.0;
-   string beTxt     = (InpBEStartStep > 0) ? StringFormat("Mulai Step %d (@%.0f%% TP)", InpBEStartStep, InpBETriggerPct) : "Nonaktif";
    string srvClock  = TimeToString(GetEstimatedServerTime(), TIME_SECONDS);
 
    string s = "";
-   s += "===========================================\n";
-   s += "  MESIN UANG ADVANCED v8.20 (XM DETIK :00)\n";
-   s += "===========================================\n";
+   s += "===============================================\n";
+   s += "  MESIN UANG v9.00 — PRECISION FLIP (RR 1:2)\n";
+   s += "===============================================\n";
    s += " Simbol    : " + _Symbol + " | Jam Srv: " + srvClock + "\n";
    s += " Status    : " + status + "\n";
    s += " Info :00  : " + g_lastTriggerInfo + "\n";
-   s += " Pemicu    : " + ((InpTriggerMode == TRIGGER_CANDLE) ? "Candle " + EnumToString(InpTriggerTF) : "Crossing level") + "\n";
-   s += " Step/Maks : " + IntegerToString(g_currentStep) + " / " + stepLimit + " (Maks/Tiket: " + DoubleToString(GetMaxLotPerTicket(), 2) + ")\n";
-   s += " Jarak SL  : " + distTxt + (InpCompensateSpread ? " (+Spread Komp)" : "") + "\n";
-   s += " Rasio     : SL 1 : TP " + DoubleToString(GetRR(), 1) + "\n";
-   s += " ProfitLock: " + beTxt + "\n";
+   s += " Mode Lot  : " + lotModeTx + "\n";
+   s += " Step/Maks : " + IntegerToString(g_currentStep) + " / " + stepLimit + " | Lot Step Ini: " + DoubleToString(activeLot, 2) + "\n";
+   s += StringFormat(" SL Bersih : -$%.2f (jarak %.*f / %.0f pts)\n", stepSLUsd, g_digits, showSLDist, showSLDist / g_point);
+   s += StringFormat(" TP Bersih : +$%.2f (jarak %.*f / %.0f pts) [1:%.2f]\n", stepTPUsd, g_digits, showTPDist, showTPDist / g_point, rrVal);
+   s += StringFormat(" Est Net TP: $%+.2f (tutup rugi siklus $%+.2f)\n", estNetTP, g_cycleNet);
    s += " Spread    : " + DoubleToString(spreadPts, 0) + " / " + ((InpMaxSpreadPts > 0) ? IntegerToString(InpMaxSpreadPts) : "OFF") + " poin" + spStatus + "\n";
-   s += "-------------------------------------------\n";
-   s += " Floating  : " + DoubleToString(BotFloatingPL(), 2) + " | Siklus: " + DoubleToString(g_cycleNet, 2) + "\n";
+   s += "-----------------------------------------------\n";
+   s += " Floating  : $" + DoubleToString(BotFloatingPL(), 2) + " | Siklus: $" + DoubleToString(g_cycleNet, 2) + "\n";
    s += " Hari ini  : " + DoubleToString(dayPct, 2) + " %\n";
    s += " Sesi      : TP " + IntegerToString(g_cntTP) + " | SL " + IntegerToString(g_cntSL)
         + " | Win " + DoubleToString(winRate, 1) + " %\n";
-   s += " Hasil sesi: " + DoubleToString(g_sessionNet, 2) + " | Step tertinggi: " + IntegerToString(g_maxStepReached) + "\n";
+   s += " Hasil sesi: $" + DoubleToString(g_sessionNet, 2) + " | Step maks: " + IntegerToString(g_maxStepReached) + "\n";
    s += " Magic ID  : " + IntegerToString((int)InpMagicBot) + "\n";
-   s += "===========================================";
+   s += "===============================================";
    Comment(s);
 }
 //+------------------------------------------------------------------+
